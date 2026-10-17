@@ -201,7 +201,11 @@ func (s *Server) handle(ctx context.Context, c net.Conn) {
 			}
 		}
 		s.recordSMSIngest(ctx, sess, e, "sms_fragment_received", nil)
-		if err = s.Store.Ingest(ctx, e, plain, s.Config.BarkKey != ""); err != nil {
+		var voicemailSlots []int
+		if s.Config.VoicemailEnabled {
+			voicemailSlots = s.Config.VoicemailSlots
+		}
+		if err = s.Store.Ingest(ctx, e, plain, s.Config.BarkKey != "", voicemailSlots...); err != nil {
 			s.recordSMSIngest(ctx, sess, e, "sms_fragment_rejected", err)
 			s.mu.Unlock()
 			if callReport {
@@ -465,6 +469,17 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/") {
+			if r.Method == http.MethodPost && voicemailUploadPath(r.URL.Path) {
+				if origin := r.Header.Get("Origin"); origin != "" {
+					u, e := url.Parse(origin)
+					if e != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host != r.Host || u.User != nil {
+						reply(w, 403, map[string]string{"error": "origin_rejected"})
+						return
+					}
+				}
+				s.receiveVoicemail(w, r)
+				return
+			}
 			localHealth := r.Method == "GET" && r.URL.Path == "/api/health" && loopbackPeer(r.RemoteAddr)
 			if !localHealth && s.Config.AdminToken != "" && (!strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") || subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")), []byte(s.Config.AdminToken)) != 1) {
 				reply(w, 401, map[string]string{"error": "access_required"})

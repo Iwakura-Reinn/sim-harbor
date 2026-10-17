@@ -8,10 +8,12 @@ const props = defineProps({ request: Function, state: Object })
 const seconds = ref(null),
   target = ref(110),
   storage = ref(null),
+  voicemail = ref(null),
   busy = ref(false),
   error = ref(''),
   note = ref(''),
   consent = ref(false),
+  voicemailConsent = ref(''),
   uncertain = ref(false)
 const showIdentity = ref(false),
   historyOpen = ref(false)
@@ -31,12 +33,43 @@ async function query(action) {
       seconds.value = r.seconds
       target.value = r.seconds
       uncertain.value = false
+    } else if (action === 'voicemail_query') {
+      voicemail.value = r.voicemail
+      voicemailConsent.value = ''
+      uncertain.value = false
     } else storage.value = r.storage
   } catch (e) {
     error.value = e.message
   } finally {
     busy.value = false
   }
+}
+async function applyVoicemail(intent) {
+  if (voicemailConsent.value !== intent) return
+  busy.value = true
+  error.value = ''
+  note.value = ''
+  try {
+    const r = await flow.applyVoicemail(intent, voicemail.value, true)
+    if (r) {
+      voicemail.value = r.voicemail
+      note.value = r.unchanged
+        ? '板子留言参数已与目标一致，未下发修改。'
+        : intent === 'enable'
+          ? '留言参数已下发并读回。'
+          : '已恢复为不接听，并读回确认。'
+    }
+  } catch (e) {
+    error.value = e.message + ' 请先重新查询，不要重复提交。'
+    uncertain.value = true
+  } finally {
+    busy.value = false
+    voicemailConsent.value = ''
+  }
+}
+function slotLine(slot) {
+  const names = { 0: '不接听', 1: '接听', 2: '接听并录音', 3: '挂断' }
+  return `卡槽 ${slot.slot}：${names[slot.mode] || '待核对'} · 提示音 ${slot.tts ? '已设置' : '空'}`
 }
 async function save() {
   busy.value = true
@@ -101,6 +134,49 @@ onUnmounted(() => flow.dispose())
           确认修改一次
         </button>
       </form>
+    </div>
+    <div class="settings-group">
+      <h3>
+        留言
+        <InfoTip label="留言设置说明"
+          >只下发 slotcim、slottts
+          和录音上传地址。来电上报本身不会接听或开始录音。启用前先在系统配置打开留言并重启。恢复会把已配置卡槽改回不接听、清空提示音和上传地址。查询提示音不应清空已保存的文字；若读回变空，停止写入并按文档恢复。</InfoTip
+        >
+      </h3>
+      <button type="button" :disabled="busy || !state?.online" @click="query('voicemail_query')">
+        读取留言参数
+      </button>
+      <template v-if="voicemail">
+        <p v-for="slot in voicemail.slots" :key="slot.slot">{{ slotLine(slot) }}</p>
+        <p class="tiny muted">上传地址：{{ voicemail.amr_url || '空' }}</p>
+        <p class="tiny muted">
+          启用将按已生效的系统配置写入接听并录音、预设提示音和局域网上传地址。其他卡槽保持刚才读到的值。
+        </p>
+        <label class="consent"
+          ><input
+            v-model="voicemailConsent"
+            type="radio"
+            value="enable"
+            :disabled="busy || uncertain"
+          />确认启用留言</label
+        >
+        <label class="consent"
+          ><input
+            v-model="voicemailConsent"
+            type="radio"
+            value="restore"
+            :disabled="busy || uncertain"
+          />确认恢复为不接听并清除提示音和上传地址</label
+        >
+        <button
+          type="button"
+          class="primary"
+          :disabled="busy || uncertain || !voicemailConsent || !state?.online"
+          @click="applyVoicemail(voicemailConsent)"
+        >
+          确认下发一次
+        </button>
+      </template>
     </div>
     <div class="settings-group">
       <h3>

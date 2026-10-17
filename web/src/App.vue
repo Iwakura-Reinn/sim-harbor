@@ -51,6 +51,9 @@ let credential = access.read(),
 const errors = {
   ...settingsErrors,
   invalid_board_action: '不支持此操作，或心跳值超过安全范围；请先核对参数。',
+  voicemail_disabled: '留言尚未在当前运行配置中启用。请先保存并重启应用。',
+  voicemail_source_rejected: '留言上传来源不在设备允许范围内。',
+  voicemail_upload_rejected: '留言上传未通过校验。',
   board_parameter_changed: '板子的当前值已变化，请重新查询后再确认。',
   board_reply_invalid: '板子返回的参数无法识别，保留当前设置。',
   board_setting_unknown: '板子修改结果未确认，可能已经生效。',
@@ -550,6 +553,7 @@ onUnmounted(() => {
           v-if="tab === 'calls' && state"
           :key="callsCardFilter"
           :request="api"
+          :file-request="fileRequest"
           :state="state"
           :now="now"
           :linked-id="linkedCall"

@@ -5,7 +5,7 @@ export function createBoardSettingsFlow({ request }) {
   return {
     async query(action) {
       if (busy || disposed) return null
-      if (!['heartbeat_query', 'storage_query'].includes(action))
+      if (!['heartbeat_query', 'storage_query', 'voicemail_query'].includes(action))
         throw Error('只支持已列出的查询。')
       busy = true
       try {
@@ -14,6 +14,9 @@ export function createBoardSettingsFlow({ request }) {
         if (action === 'heartbeat_query') {
           if (!Number.isInteger(r.seconds) || r.seconds < 5 || r.seconds > 600)
             throw Error('心跳查询结果不完整。')
+          uncertain = false
+        } else if (action === 'voicemail_query') {
+          checkedVoicemail(r.voicemail)
           uncertain = false
         } else if (
           !r.storage ||
@@ -53,8 +56,54 @@ export function createBoardSettingsFlow({ request }) {
         busy = false
       }
     },
+    async applyVoicemail(intent, expected, confirmed) {
+      if (busy || uncertain || disposed) return null
+      if (!confirmed || !['enable', 'restore'].includes(intent))
+        throw Error('请先查询并核对要修改的参数。')
+      checkedVoicemail(expected)
+      busy = true
+      try {
+        const r = await request('/board/parameters', 'POST', {
+          action: 'voicemail_apply',
+          intent,
+          expected,
+          confirmed: true,
+        })
+        if (disposed) return null
+        checkedVoicemail(r.voicemail)
+        if (r.verified !== true) throw Error('修改结果尚未确认。')
+        uncertain = false
+        return r
+      } catch (e) {
+        if (!disposed) uncertain = true
+        throw e
+      } finally {
+        busy = false
+      }
+    },
     dispose() {
       disposed = true
     },
+  }
+}
+
+function checkedVoicemail(value) {
+  if (
+    !value ||
+    typeof value.amr_url !== 'string' ||
+    !Array.isArray(value.slots) ||
+    value.slots.length !== 2
+  )
+    throw Error('留言查询结果不完整。')
+  for (const slot of [1, 2]) {
+    const row = value.slots.find((item) => item.slot === slot)
+    if (
+      !row ||
+      !Number.isInteger(row.mode) ||
+      row.mode < 0 ||
+      row.mode > 3 ||
+      typeof row.tts !== 'string'
+    )
+      throw Error('留言查询结果不完整。')
   }
 }

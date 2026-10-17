@@ -166,6 +166,9 @@ func databaseInfo(ctx context.Context, path string) (Manifest, error) {
 	if m.Schema >= 11 {
 		tables = append(tables, "calls", "call_notifications")
 	}
+	if m.Schema >= 17 {
+		tables = append(tables, "voicemails")
+	}
 	if m.Schema >= 5 {
 		tables = append(tables, "recovery_guard")
 	}
@@ -223,6 +226,13 @@ func databaseInfo(ctx context.Context, path string) (Manifest, error) {
 	// Check columns consumed by the runtime before the restore tool can migrate.
 	if m.Schema >= 16 {
 		r, err := db.QueryContext(ctx, `SELECT sms_total,sms_group_ref FROM messages LIMIT 0`)
+		if err != nil {
+			return m, ErrInvalidBackup
+		}
+		r.Close()
+	}
+	if m.Schema >= 17 {
+		r, err := db.QueryContext(ctx, `SELECT id,media_id,call_id,slot,phone,start_ts,sha256,size,stored_name,created_at FROM voicemails LIMIT 0`)
 		if err != nil {
 			return m, ErrInvalidBackup
 		}

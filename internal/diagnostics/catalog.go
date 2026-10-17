@@ -14,6 +14,8 @@ var catalog = map[string]Definition{
 	"sms_fragment_rejected":           {"warn", "sms", "长短信上报未能入库，原有记录保留"},
 	"board_parameter_command":         {"info", "query", "板子参数命令已尝试下发"},
 	"board_parameter_verified":        {"info", "query", "板子参数修改已读回确认"},
+	"voicemail_stored":                {"info", "call", "留言录音已保存"},
+	"voicemail_rejected":              {"warn", "call", "留言录音未接受"},
 	"status_alert_observation_failed": {"warn", "notification", "持续异常观察暂时失败"},
 	"card_notifications_changed":      {"info", "notification", "卡通知开关已更新"},
 	"service_started":                 {"info", "service", "应用已启动"},

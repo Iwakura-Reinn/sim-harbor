@@ -220,6 +220,11 @@ DELETE FROM schema_version; INSERT INTO schema_version VALUES(6);`); e != nil {
 			return e
 		}
 	}
+	if version.Int64 < 17 {
+		if e = migrateVoicemail(tx); e != nil {
+			return e
+		}
+	}
 
 	if _, e = tx.Exec(`UPDATE calls SET state='unknown' WHERE ended=0`); e != nil {
 		return e
@@ -232,7 +237,7 @@ DELETE FROM schema_version; INSERT INTO schema_version VALUES(6);`); e != nil {
 }
 func hash(p []byte) string { h := sha256.Sum256(p); return hex.EncodeToString(h[:]) }
 
-func (s *Store) Ingest(ctx context.Context, e protocol.Event, raw []byte, notify bool) error {
+func (s *Store) Ingest(ctx context.Context, e protocol.Event, raw []byte, notify bool, voicemailSlots ...int) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -264,7 +269,13 @@ func (s *Store) Ingest(ctx context.Context, e protocol.Event, raw []byte, notify
 		}
 	}
 	if protocol.IsIncomingCall(e.Type) {
-		if err = ingestCall(ctx, tx, e, raw, notify, now); err != nil {
+		voicemail := false
+		for _, slot := range voicemailSlots {
+			if slot == int(e.Slot) {
+				voicemail = true
+			}
+		}
+		if err = ingestCall(ctx, tx, e, raw, notify, now, voicemail); err != nil {
 			return err
 		}
 	}

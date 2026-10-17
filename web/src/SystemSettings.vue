@@ -11,6 +11,7 @@ const snapshot = ref(null),
   error = ref(''),
   note = ref(''),
   consent = ref(false),
+  voicemailConsent = ref(false),
   restartConsent = ref(false),
   uncertain = ref(false),
   restarting = ref(false)
@@ -70,9 +71,33 @@ const secretFields = [
   ['admin_token', '管理访问凭据（至少24字符）'],
   ['bark_key', 'Bark Key'],
 ]
-const canSave = computed(
-  () => snapshot.value && !busy.value && !uncertain.value && !restarting.value && consent.value,
+const enablingVoicemail = computed(
+  () =>
+    values.value.voicemail_enabled === true && snapshot.value?.values?.voicemail_enabled !== true,
 )
+const canSave = computed(
+  () =>
+    snapshot.value &&
+    !busy.value &&
+    !uncertain.value &&
+    !restarting.value &&
+    consent.value &&
+    (!enablingVoicemail.value || voicemailConsent.value),
+)
+function toggleVoicemailSlot(slot) {
+  const slots = new Set(values.value.voicemail_slots || [])
+  if (slots.has(slot)) slots.delete(slot)
+  else slots.add(slot)
+  values.value.voicemail_slots = [...slots].sort()
+  voicemailConsent.value = false
+}
+function fillVoicemailURL() {
+  const bytes = new Uint8Array(16)
+  crypto.getRandomValues(bytes)
+  const token = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('')
+  values.value.voicemail_amr_url = `http://192.168.31.x:18880/api/voicemail/amr/${token}?slot={{slot}}&start={{telStartTs}}&phone={{phNum|$urlEncode()}}`
+  voicemailConsent.value = false
+}
 function adopt(data) {
   snapshot.value = data
   values.value = {
@@ -83,6 +108,7 @@ function adopt(data) {
   sources.value = (data.values.device_cidrs || []).join('\n')
   secrets.value = {}
   consent.value = false
+  voicemailConsent.value = false
   restartConsent.value = false
   uncertain.value = false
   if (!data.pending_restart) restarting.value = false
@@ -116,7 +142,13 @@ async function save() {
       .filter(Boolean),
   }
   try {
-    const data = await flow.save(body, replacement, snapshot.value.revision, consent.value)
+    const data = await flow.save(
+      body,
+      replacement,
+      snapshot.value.revision,
+      consent.value,
+      voicemailConsent.value,
+    )
     if (data && !stopped) {
       adopt(data)
       note.value = '配置已保存。确认后重启管理应用使其生效；板子配置不会被自动修改。'
@@ -302,6 +334,63 @@ onUnmounted(() => {
         </div>
         <div class="settings-group">
           <h3>业务选项</h3>
+          <h3>
+            留言（默认关闭）
+            <InfoTip label="留言说明">
+              关闭时只记录来电，不接听、不拒接、不拨号。开启并重启后，还需在板子设置确认下发；所选卡槽由板子自动接听、播放提示音并录音。这与“只提醒、不接听”互斥，可能产生通话费用。上传地址必须是板子能访问的局域网
+              HTTP，不能使用公网域名。
+            </InfoTip>
+          </h3>
+          <label class="consent"
+            ><input
+              v-model="values.voicemail_enabled"
+              type="checkbox"
+              @change="voicemailConsent = false"
+            />允许所选卡槽自动接听并留言</label
+          >
+          <div class="settings-grid">
+            <label class="consent"
+              ><input
+                type="checkbox"
+                :checked="(values.voicemail_slots || []).includes(1)"
+                @change="toggleVoicemailSlot(1)"
+              />卡槽 1</label
+            >
+            <label class="consent"
+              ><input
+                type="checkbox"
+                :checked="(values.voicemail_slots || []).includes(2)"
+                @change="toggleVoicemailSlot(2)"
+              />卡槽 2</label
+            >
+          </div>
+          <label
+            >接听后播放的提示音<textarea
+              v-model="values.voicemail_tts"
+              rows="3"
+              maxlength="274"
+              placeholder="请在提示音后留言"
+            />
+          </label>
+          <label
+            >录音上传地址（局域网 HTTP）<input
+              v-model="values.voicemail_amr_url"
+              type="text"
+              maxlength="500"
+              placeholder="http://192.168.31.10:18880/api/voicemail/amr/…"
+            />
+          </label>
+          <button type="button" @click="fillVoicemailURL">填入局域网模板</button>
+          <p class="tiny muted">
+            把模板里的 x
+            换成这台管理主机的局域网地址，并核对发布端口。保存不会改板子；重启后到“板子设置”读取、确认并读回。
+          </p>
+          <label v-if="enablingVoicemail" class="consent"
+            ><input
+              v-model="voicemailConsent"
+              type="checkbox"
+            />我确认开启留言：所选卡槽会自动接听并录音，可能产生通话费用，且不再只做未接提醒。</label
+          >
           <label class="consent"
             ><input v-model="values.status_alerts_enabled" type="checkbox" />持续异常与恢复提醒
             <InfoTip label="持续异常提醒规则"

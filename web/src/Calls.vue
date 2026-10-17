@@ -11,8 +11,10 @@ import {
   groupContainsCall,
 } from './call-history.js'
 import CallEntry from './CallEntry.vue'
+import { saveFile } from './download.js'
 const props = defineProps({
   request: Function,
+  fileRequest: Function,
   state: Object,
   now: Number,
   linkedId: Number,
@@ -120,6 +122,19 @@ function clearDetails() {
   details.clear()
   expanded.value = {}
 }
+async function downloadVoicemail(call) {
+  if (!props.fileRequest || !call?.voicemail_id) return
+  error.value = ''
+  try {
+    const blob = await props.fileRequest('/calls/' + call.id + '/voicemail', 'GET', undefined, {
+      types: ['audio/amr'],
+      max: 2 * 1024 * 1024,
+    })
+    saveFile(blob, 'voicemail-' + call.id + '.amr')
+  } catch (e) {
+    if (!stopped) error.value = e.message
+  }
+}
 async function filter() {
   linked.value = null
   linkedGroup.value = null
@@ -174,7 +189,8 @@ onUnmounted(() => {
         <h2>
           来电记录
           <InfoTip label="来电记录说明"
-            >同一卡、同一号码合并展示，展开查看每次来电。只记录，不会接听、拒接或拨号；完整未接结束后提醒一次；只有开始时，5分钟后兜底提醒。<br />次数包含这张卡的全部已保存来电，逐次记录保留当时卡名和卡槽。匿名或身份未确认的来电单独展示。时长以板子上报为准；Bark
+            >同一卡、同一号码合并展示，展开查看每次来电。默认只记录，不会接听、拒接或拨号；完整未接结束后提醒一次；只有开始时，5分钟后兜底提醒。留言需在系统配置单独开启，录音可下载为
+            AMR。<br />次数包含这张卡的全部已保存来电，逐次记录保留当时卡名和卡槽。匿名或身份未确认的来电单独展示。时长以板子上报为准；Bark
             已接受不等于 iPhone 已读。</InfoTip
           >
         </h2>
@@ -248,6 +264,7 @@ onUnmounted(() => {
             :call="call"
             :cards="state?.cards"
             :highlighted="linked?.id === call.id"
+            :on-download="downloadVoicemail"
           />
           <div v-if="expanded[group.id].next" class="load-more">
             <button :disabled="expanded[group.id].loading" @click="loadDetails(group, true)">

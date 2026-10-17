@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"github.com/Battery233/sim-harbor/internal/diagnostics"
 	"net/http"
 	"strconv"
@@ -82,25 +83,39 @@ func parseStorage(value string) (map[string]bool, bool) {
 func (s *Server) boardSettingsRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/board/parameters", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
-			Action    string `json:"action"`
-			Seconds   *int   `json:"seconds"`
-			Expected  *int   `json:"expected"`
-			Confirmed bool   `json:"confirmed"`
+			Action    string          `json:"action"`
+			Seconds   *int            `json:"seconds"`
+			Expected  json.RawMessage `json:"expected"`
+			Confirmed bool            `json:"confirmed"`
+			Intent    string          `json:"intent"`
 		}
 		if !decodeAction(w, r, &in) {
 			return
 		}
-		if in.Action != "heartbeat_query" && in.Action != "heartbeat_set" && in.Action != "storage_query" {
+		if in.Action == "voicemail_query" || in.Action == "voicemail_apply" {
+			s.handleVoicemailBoard(w, r, in.Action, in.Intent, in.Confirmed, in.Seconds, in.Expected)
+			return
+		}
+		if in.Intent != "" || (in.Action != "heartbeat_query" && in.Action != "heartbeat_set" && in.Action != "storage_query") {
 			reply(w, 400, map[string]string{"error": "invalid_board_action"})
 			return
 		}
-		setting := in.Action == "heartbeat_set"
-		if setting {
-			if !in.Confirmed || in.Seconds == nil || in.Expected == nil || *in.Seconds < 5 || *in.Seconds > 600 || *in.Seconds >= s.Config.StaleSeconds-15 {
+		var expectedSeconds *int
+		if len(in.Expected) > 0 && string(in.Expected) != "null" {
+			var n int
+			if json.Unmarshal(in.Expected, &n) != nil {
 				reply(w, 400, map[string]string{"error": "invalid_board_action"})
 				return
 			}
-		} else if in.Seconds != nil || in.Expected != nil || in.Confirmed {
+			expectedSeconds = &n
+		}
+		setting := in.Action == "heartbeat_set"
+		if setting {
+			if !in.Confirmed || in.Seconds == nil || expectedSeconds == nil || *in.Seconds < 5 || *in.Seconds > 600 || *in.Seconds >= s.Config.StaleSeconds-15 {
+				reply(w, 400, map[string]string{"error": "invalid_board_action"})
+				return
+			}
+		} else if in.Seconds != nil || expectedSeconds != nil || in.Confirmed {
 			reply(w, 400, map[string]string{"error": "invalid_board_action"})
 			return
 		}
@@ -149,7 +164,7 @@ func (s *Server) boardSettingsRoutes(mux *http.ServeMux) {
 			reply(w, 200, map[string]any{"seconds": current})
 			return
 		}
-		if current != *in.Expected {
+		if current != *expectedSeconds {
 			reply(w, 409, map[string]string{"error": "board_parameter_changed"})
 			return
 		}

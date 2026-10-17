@@ -25,7 +25,7 @@ func TestMultipartMetadataBackupRestoreAndContinuation(t *testing.T) {
 	}
 	defer a.Close()
 	p, err := Inspect(ctx, a.Path)
-	if err != nil || p.Manifest.Schema != 16 {
+	if err != nil || p.Manifest.Schema != store.SchemaVersion {
 		t.Fatal("metadata backup invalid", err)
 	}
 	target := filepath.Join(t.TempDir(), "restored")
@@ -80,7 +80,7 @@ func TestVersionFifteenOfflineBackupStaysOldAndRestoresToSixteen(t *testing.T) {
 	if err := s.DB.QueryRow(`SELECT file FROM pragma_database_list WHERE name='main'`).Scan(&database); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB.Exec(`DROP INDEX messages_sms_group; ALTER TABLE messages DROP COLUMN sms_total; ALTER TABLE messages DROP COLUMN sms_group_ref; DELETE FROM schema_version; INSERT INTO schema_version VALUES(15)`); err != nil {
+	if _, err := s.DB.Exec(`DROP TABLE IF EXISTS voicemails; DROP INDEX messages_sms_group; ALTER TABLE messages DROP COLUMN sms_total; ALTER TABLE messages DROP COLUMN sms_group_ref; DELETE FROM schema_version; INSERT INTO schema_version VALUES(15)`); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.DB.Close(); err != nil {
@@ -108,7 +108,7 @@ func TestVersionFifteenOfflineBackupStaysOldAndRestoresToSixteen(t *testing.T) {
 	}
 	defer r.DB.Close()
 	var schema int
-	if err = r.DB.QueryRow(`SELECT max(version) FROM schema_version`).Scan(&schema); err != nil || schema != 16 {
+	if err = r.DB.QueryRow(`SELECT max(version) FROM schema_version`).Scan(&schema); err != nil || schema != store.SchemaVersion {
 		t.Fatal("restored database did not upgrade", err)
 	}
 	m, err := r.Message(ctx, 1)

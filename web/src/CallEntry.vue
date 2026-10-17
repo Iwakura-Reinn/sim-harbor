@@ -1,7 +1,7 @@
 <script setup>
 import { messageSource } from './inbox-cards.js'
 import { callStates, callerLabel, ringingLabel, callPushLabel } from './call-history.js'
-defineProps({ call: Object, cards: Array, highlighted: Boolean })
+defineProps({ call: Object, cards: Array, highlighted: Boolean, onDownload: Function })
 function date(ts) {
   return ts ? new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false }) : '未报告'
 }
@@ -42,6 +42,10 @@ function date(ts) {
     </p>
     <p v-if="!call.started_at && call.received_at" class="tiny muted">
       最近报告收到于 {{ date(call.received_at) }}，这不是已确认的来电开始时间。
+    </p>
+    <p v-if="call.voicemail_id" class="tiny">
+      <button type="button" @click="onDownload(call)">下载留言 AMR</button>
+      <span class="muted"> {{ call.voicemail_bytes }} 字节，浏览器不播放。</span>
     </p>
     <p class="tiny" :class="{ 'call-push-sent': call.notification_state === 'sent' }">
       {{ callPushLabel(call)
