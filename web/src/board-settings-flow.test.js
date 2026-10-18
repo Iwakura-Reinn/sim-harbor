@@ -55,6 +55,30 @@ test('留言下发必须确认，查询不携带写入字段', async () => {
   assert.equal(calls[1].intent, 'restore')
   assert.equal(calls[1].confirmed, true)
 })
+test('固件拒绝 TCP 时，确认请求才携带短信号码和密码', async () => {
+  const calls = []
+  const smsState = {
+    channel: 'sms',
+    amr_url: '',
+    slots: [
+      { slot: 1, mode: null, tts: null },
+      { slot: 2, mode: null, tts: null },
+    ],
+  }
+  const flow = createBoardSettingsFlow({
+    request: async (path, method, body, options) => {
+      calls.push({ body, options })
+      return { voicemail: smsState, verified: true }
+    },
+  })
+  await flow.query('voicemail_query')
+  assert.equal(calls[0].body.sms_phone, undefined)
+  assert.equal(calls[0].body.sms_password, undefined)
+  await flow.applyVoicemail('enable', smsState, true, { phone: '13800138000', password: '000000' })
+  assert.equal(calls[1].body.sms_phone, '13800138000')
+  assert.equal(calls[1].body.sms_password, '000000')
+  assert.equal(calls[1].options.timeout, 90000)
+})
 test('板子设置结果不完整不声称成功，不支持任意命令', async () => {
   const flow = createBoardSettingsFlow({ request: async () => ({ seconds: 120 }) })
   await assert.rejects(flow.query('restart'))

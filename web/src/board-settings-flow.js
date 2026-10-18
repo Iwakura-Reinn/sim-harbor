@@ -56,19 +56,22 @@ export function createBoardSettingsFlow({ request }) {
         busy = false
       }
     },
-    async applyVoicemail(intent, expected, confirmed) {
+    async applyVoicemail(intent, expected, confirmed, sms) {
       if (busy || uncertain || disposed) return null
       if (!confirmed || !['enable', 'restore'].includes(intent))
         throw Error('请先查询并核对要修改的参数。')
       checkedVoicemail(expected)
       busy = true
       try {
-        const r = await request('/board/parameters', 'POST', {
+        const body = {
           action: 'voicemail_apply',
           intent,
           expected,
           confirmed: true,
-        })
+        }
+        if (sms?.phone) body.sms_phone = sms.phone
+        if (sms?.password) body.sms_password = sms.password
+        const r = await request('/board/parameters', 'POST', body, { timeout: 90000 })
         if (disposed) return null
         checkedVoicemail(r.voicemail)
         if (r.verified !== true) throw Error('修改结果尚未确认。')
@@ -95,15 +98,13 @@ function checkedVoicemail(value) {
     value.slots.length !== 2
   )
     throw Error('留言查询结果不完整。')
+  const channel = value.channel || 'tcp'
+  if (channel !== 'tcp' && channel !== 'sms') throw Error('留言查询结果不完整。')
   for (const slot of [1, 2]) {
     const row = value.slots.find((item) => item.slot === slot)
-    if (
-      !row ||
-      !Number.isInteger(row.mode) ||
-      row.mode < 0 ||
-      row.mode > 3 ||
-      typeof row.tts !== 'string'
-    )
+    if (!row) throw Error('留言查询结果不完整。')
+    if (channel === 'sms' && row.mode == null && row.tts == null) continue
+    if (!Number.isInteger(row.mode) || row.mode < 0 || row.mode > 3 || typeof row.tts !== 'string')
       throw Error('留言查询结果不完整。')
   }
 }

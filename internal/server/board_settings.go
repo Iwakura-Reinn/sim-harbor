@@ -83,17 +83,19 @@ func parseStorage(value string) (map[string]bool, bool) {
 func (s *Server) boardSettingsRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/board/parameters", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
-			Action    string          `json:"action"`
-			Seconds   *int            `json:"seconds"`
-			Expected  json.RawMessage `json:"expected"`
-			Confirmed bool            `json:"confirmed"`
-			Intent    string          `json:"intent"`
+			Action      string          `json:"action"`
+			Seconds     *int            `json:"seconds"`
+			Expected    json.RawMessage `json:"expected"`
+			Confirmed   bool            `json:"confirmed"`
+			Intent      string          `json:"intent"`
+			SMSPhone    string          `json:"sms_phone"`
+			SMSPassword string          `json:"sms_password"`
 		}
 		if !decodeAction(w, r, &in) {
 			return
 		}
 		if in.Action == "voicemail_query" || in.Action == "voicemail_apply" {
-			s.handleVoicemailBoard(w, r, in.Action, in.Intent, in.Confirmed, in.Seconds, in.Expected)
+			s.handleVoicemailBoard(w, r, in.Action, in.Intent, in.Confirmed, in.Seconds, in.Expected, in.SMSPhone, in.SMSPassword)
 			return
 		}
 		if in.Intent != "" || (in.Action != "heartbeat_query" && in.Action != "heartbeat_set" && in.Action != "storage_query") {

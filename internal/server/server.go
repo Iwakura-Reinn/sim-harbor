@@ -28,16 +28,18 @@ import (
 )
 
 type session struct {
-	diagnosticID string
-	conn         net.Conn
-	write        sync.Mutex
-	mu           sync.Mutex
-	tid          string
-	response     chan queryReply
-	hasStatus    bool // Protected by Server.mu; cached status must belong to this connection.
-	statusAt     time.Time
-	lastSeen     time.Time
-	autoAttempt  time.Time
+	diagnosticID    string
+	conn            net.Conn
+	write           sync.Mutex
+	mu              sync.Mutex
+	tid             string
+	response        chan queryReply
+	smsWatch        chan protocol.Event
+	acceptSMSReport bool
+	hasStatus       bool // Protected by Server.mu; cached status must belong to this connection.
+	statusAt        time.Time
+	lastSeen        time.Time
+	autoAttempt     time.Time
 }
 type queryReply struct {
 	event      protocol.Event
@@ -205,16 +207,20 @@ func (s *Server) handle(ctx context.Context, c net.Conn) {
 		if s.Config.VoicemailEnabled {
 			voicemailSlots = s.Config.VoicemailSlots
 		}
-		if err = s.Store.Ingest(ctx, e, plain, s.Config.BarkKey != "", voicemailSlots...); err != nil {
-			s.recordSMSIngest(ctx, sess, e, "sms_fragment_rejected", err)
-			s.mu.Unlock()
-			if callReport {
-				s.notificationGate.Unlock()
+		// The command text contains the board user password. Reply texts are
+		// control results, not inbox messages, and must not become Bark alerts.
+		if !voicemailControlSMS(e) {
+			if err = s.Store.Ingest(ctx, e, plain, s.Config.BarkKey != "", voicemailSlots...); err != nil {
+				s.recordSMSIngest(ctx, sess, e, "sms_fragment_rejected", err)
+				s.mu.Unlock()
+				if callReport {
+					s.notificationGate.Unlock()
+				}
+				closed = "event_persistence_failed"
+				return
 			}
-			closed = "event_persistence_failed"
-			return
+			s.recordSMSIngest(ctx, sess, e, "sms_fragment_stored", nil)
 		}
-		s.recordSMSIngest(ctx, sess, e, "sms_fragment_stored", nil)
 		var old *session
 		becameBound := !bound
 		if !bound {
@@ -250,7 +256,13 @@ func (s *Server) handle(ctx context.Context, c net.Conn) {
 			}
 		}
 		sess.mu.Lock()
-		if e.TID != "" && e.TID == sess.tid && sess.response != nil && (e.Type == 402 || (e.Type == 401 && e.Code != nil && *e.Code != 0)) {
+		if e.Type == 501 && sess.smsWatch != nil {
+			select {
+			case sess.smsWatch <- e:
+			default:
+			}
+		}
+		if e.TID != "" && e.TID == sess.tid && sess.response != nil && (e.Type == 402 || (e.Type == 401 && e.Code != nil && *e.Code != 0) || (sess.acceptSMSReport && e.Type == 502)) {
 			select {
 			case sess.response <- queryReply{e, receivedAt}:
 			default:

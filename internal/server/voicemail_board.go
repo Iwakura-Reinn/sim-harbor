@@ -4,32 +4,35 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/Battery233/sim-harbor/internal/diagnostics"
+	"github.com/Battery233/sim-harbor/internal/protocol"
 )
 
 type voicemailSlotState struct {
-	Slot int    `json:"slot"`
-	Mode int    `json:"mode"`
-	TTS  string `json:"tts"`
+	Slot int     `json:"slot"`
+	Mode *int    `json:"mode"`
+	TTS  *string `json:"tts"`
 }
 
 type voicemailBoardState struct {
-	AMRURL string               `json:"amr_url"`
-	Slots  []voicemailSlotState `json:"slots"`
+	AMRURL  string               `json:"amr_url"`
+	Channel string               `json:"channel"`
+	Slots   []voicemailSlotState `json:"slots"`
 }
 
-func (s *Server) handleVoicemailBoard(w http.ResponseWriter, r *http.Request, action, intent string, confirmed bool, seconds *int, expectedRaw json.RawMessage) {
+func (s *Server) handleVoicemailBoard(w http.ResponseWriter, r *http.Request, action, intent string, confirmed bool, seconds *int, expectedRaw json.RawMessage, smsPhone, smsPassword string) {
 	if seconds != nil {
 		reply(w, 400, map[string]string{"error": "invalid_board_action"})
 		return
 	}
 	if action == "voicemail_query" {
-		if confirmed || intent != "" || len(expectedRaw) > 0 && string(expectedRaw) != "null" {
+		if confirmed || intent != "" || len(expectedRaw) > 0 && string(expectedRaw) != "null" || smsPhone != "" || smsPassword != "" {
 			reply(w, 400, map[string]string{"error": "invalid_board_action"})
 			return
 		}
@@ -80,12 +83,26 @@ func (s *Server) handleVoicemailBoard(w http.ResponseWriter, r *http.Request, ac
 		return
 	}
 	if !sameVoicemailState(current, target) {
-		if problem = s.writeVoicemailBoard(r.Context(), sess, intent, current, target); problem != "" {
+		if current.Channel == "sms" {
+			if !boardPhone.MatchString(strings.TrimSpace(smsPhone)) || !validBoardPassword(smsPassword) {
+				reply(w, 409, map[string]string{"error": "voicemail_sms_required"})
+				return
+			}
+			if intent == "enable" && strings.ContainsAny(s.Config.VoicemailTTS, "#@&~") {
+				reply(w, 400, map[string]string{"error": "voicemail_tts_rejected"})
+				return
+			}
+		}
+		if problem = s.writeVoicemailBoard(r.Context(), sess, intent, strings.TrimSpace(smsPhone), smsPassword, current, target); problem != "" {
+			if problem == "voicemail_sms_rejected" {
+				reply(w, 502, map[string]string{"error": problem})
+				return
+			}
 			reply(w, 502, map[string]string{"error": "board_setting_unknown"})
 			return
 		}
 	}
-	verified, problem := s.readVoicemailBoard(r.Context(), sess)
+	verified, problem := s.readBackVoicemailBoard(r.Context(), sess, target)
 	if problem != "" || !sameVoicemailState(verified, target) {
 		reply(w, 502, map[string]string{"error": "board_setting_unknown"})
 		return
@@ -102,9 +119,9 @@ func (s *Server) voicemailTarget(intent string, current voicemailBoardState) (vo
 		for _, slot := range s.Config.VoicemailSlots {
 			touch[slot] = true
 		}
-	} else if intent == "restore" {
+	} else if intent == "restore" && current.Channel != "sms" {
 		for _, slot := range current.Slots {
-			if slot.Mode != 0 || slot.TTS != "" {
+			if slot.Mode == nil || *slot.Mode != 0 || slot.TTS == nil || *slot.TTS != "" {
 				touch[slot.Slot] = true
 			}
 		}
@@ -119,16 +136,18 @@ func (s *Server) voicemailTarget(intent string, current voicemailBoardState) (vo
 		target.AMRURL = s.Config.VoicemailAMRURL
 		for i, slot := range target.Slots {
 			if touch[slot.Slot] {
-				target.Slots[i].Mode = 2
-				target.Slots[i].TTS = s.Config.VoicemailTTS
+				mode, text := 2, s.Config.VoicemailTTS
+				target.Slots[i].Mode = &mode
+				target.Slots[i].TTS = &text
 			}
 		}
 	case "restore":
 		target.AMRURL = ""
 		for i, slot := range target.Slots {
 			if touch[slot.Slot] {
-				target.Slots[i].Mode = 0
-				target.Slots[i].TTS = ""
+				mode, text := 0, ""
+				target.Slots[i].Mode = &mode
+				target.Slots[i].TTS = &text
 			}
 		}
 	default:
@@ -137,29 +156,58 @@ func (s *Server) voicemailTarget(intent string, current voicemailBoardState) (vo
 	return target, true
 }
 
-func (s *Server) writeVoicemailBoard(ctx context.Context, sess *session, intent string, current, target voicemailBoardState) string {
-	type step struct {
+func (s *Server) writeVoicemailBoard(ctx context.Context, sess *session, intent, phone, password string, current, target voicemailBoardState) string {
+	type tcpStep struct {
 		cmd    string
 		sub    int
 		params map[string]string
 	}
-	var steps []step
+	type smsStep struct {
+		slot int
+		body string
+		ok   func(string) bool
+	}
+	var tcp []tcpStep
+	var messages []smsStep
 	modeWrites := func() {
 		for _, slot := range target.Slots {
 			cur := slotByNumber(current, slot.Slot)
-			if cur.Mode == slot.Mode {
+			if sameOptionalInt(cur.Mode, slot.Mode) {
 				continue
 			}
-			steps = append(steps, step{"slotcim", -1, map[string]string{"p1": strconv.Itoa(slot.Slot), "p2": strconv.Itoa(slot.Mode)}})
+			if current.Channel == "sms" {
+				body, ok := voicemailSMSBody(slot.Slot, password, "mode", *slot.Mode, "")
+				if !ok {
+					messages = append(messages, smsStep{})
+					return
+				}
+				mode := *slot.Mode
+				n := slot.Slot
+				messages = append(messages, smsStep{slot: n, body: body, ok: func(text string) bool { return smsModeOK(text, n, mode) }})
+				continue
+			}
+			messages = nil
+			tcp = append(tcp, tcpStep{"slotcim", -1, map[string]string{"p1": strconv.Itoa(slot.Slot), "p2": strconv.Itoa(*slot.Mode)}})
 		}
 	}
 	textWrites := func() {
 		for _, slot := range target.Slots {
 			cur := slotByNumber(current, slot.Slot)
-			if cur.TTS == slot.TTS {
+			if sameOptionalString(cur.TTS, slot.TTS) {
 				continue
 			}
-			steps = append(steps, step{"slottts", -1, map[string]string{"p1": strconv.Itoa(slot.Slot), "p2": slot.TTS}})
+			if current.Channel == "sms" {
+				body, ok := voicemailSMSBody(slot.Slot, password, "tts", 0, *slot.TTS)
+				if !ok {
+					messages = append(messages, smsStep{})
+					return
+				}
+				clear := *slot.TTS == ""
+				n := slot.Slot
+				messages = append(messages, smsStep{slot: n, body: body, ok: func(text string) bool { return smsTTSOK(text, n, clear) }})
+				continue
+			}
+			tcp = append(tcp, tcpStep{"slottts", -1, map[string]string{"p1": strconv.Itoa(slot.Slot), "p2": *slot.TTS}})
 		}
 	}
 	urlWrite := func() {
@@ -170,7 +218,7 @@ func (s *Server) writeVoicemailBoard(ctx context.Context, sess *session, intent 
 		if value == "" {
 			value = "clear"
 		}
-		steps = append(steps, step{"setamrurl", 55, map[string]string{"p1": value}})
+		tcp = append(tcp, tcpStep{"setamrurl", 55, map[string]string{"p1": value}})
 	}
 	if intent == "restore" {
 		modeWrites()
@@ -181,16 +229,55 @@ func (s *Server) writeVoicemailBoard(ctx context.Context, sess *session, intent 
 		textWrites()
 		modeWrites()
 	}
-	for _, item := range steps {
-		if _, problem := s.boardTextCommand(ctx, sess, item.cmd, item.sub, item.params); problem != "" {
-			return problem
+	for _, item := range messages {
+		if item.body == "" || item.ok == nil {
+			return "board_setting_unknown"
 		}
 	}
-	return ""
+	runTCP := func(items []tcpStep) string {
+		for _, item := range items {
+			if _, problem := s.boardTextCommand(ctx, sess, item.cmd, item.sub, item.params); problem != "" {
+				return problem
+			}
+		}
+		return ""
+	}
+	runSMS := func() string {
+		for _, item := range messages {
+			if problem := s.boardSMSCommand(ctx, sess, item.slot, phone, item.body, item.ok); problem != "" {
+				return problem
+			}
+		}
+		return ""
+	}
+	if intent == "restore" {
+		if problem := runSMS(); problem != "" {
+			return problem
+		}
+		return runTCP(tcp)
+	}
+	if problem := runTCP(tcp); problem != "" {
+		return problem
+	}
+	return runSMS()
 }
 
 func (s *Server) readVoicemailBoard(ctx context.Context, sess *session) (voicemailBoardState, string) {
+	url, problem := s.boardTextCommand(ctx, sess, "askamrurl", 56, nil)
+	if problem != "" {
+		return voicemailBoardState{}, problem
+	}
+	parsedURL, ok := parseAMRURL(url.event.Val)
+	if !ok {
+		return voicemailBoardState{}, "board_reply_invalid"
+	}
+	state := voicemailBoardState{AMRURL: parsedURL, Channel: "tcp", Slots: []voicemailSlotState{{Slot: 1}, {Slot: 2}}}
 	modes, problem := s.boardTextCommand(ctx, sess, "slotcim", -1, nil)
+	if problem == "device_query_failed" {
+		state.Channel = "sms"
+		s.Logs.Record("voicemail_sms_channel", diagnostics.Fields{Session: sess.diagnosticID})
+		return state, ""
+	}
 	if problem != "" {
 		return voicemailBoardState{}, problem
 	}
@@ -198,8 +285,9 @@ func (s *Server) readVoicemailBoard(ctx context.Context, sess *session) (voicema
 	if !ok {
 		return voicemailBoardState{}, "board_reply_invalid"
 	}
-	state := voicemailBoardState{Slots: []voicemailSlotState{{Slot: 1, Mode: parsed[1]}, {Slot: 2, Mode: parsed[2]}}}
 	for i, slot := range state.Slots {
+		mode := parsed[slot.Slot]
+		state.Slots[i].Mode = &mode
 		reply, problem := s.boardTextCommand(ctx, sess, "slottts", -1, map[string]string{"p1": strconv.Itoa(slot.Slot)})
 		if problem != "" {
 			return voicemailBoardState{}, problem
@@ -208,7 +296,14 @@ func (s *Server) readVoicemailBoard(ctx context.Context, sess *session) (voicema
 		if !ok {
 			return voicemailBoardState{}, "board_reply_invalid"
 		}
-		state.Slots[i].TTS = text
+		state.Slots[i].TTS = &text
+	}
+	return state, ""
+}
+
+func (s *Server) readBackVoicemailBoard(ctx context.Context, sess *session, target voicemailBoardState) (voicemailBoardState, string) {
+	if target.Channel != "sms" {
+		return s.readVoicemailBoard(ctx, sess)
 	}
 	url, problem := s.boardTextCommand(ctx, sess, "askamrurl", 56, nil)
 	if problem != "" {
@@ -218,8 +313,10 @@ func (s *Server) readVoicemailBoard(ctx context.Context, sess *session) (voicema
 	if !ok {
 		return voicemailBoardState{}, "board_reply_invalid"
 	}
-	state.AMRURL = parsedURL
-	return state, ""
+	verified := target
+	verified.Slots = append([]voicemailSlotState(nil), target.Slots...)
+	verified.AMRURL = parsedURL
+	return verified, ""
 }
 
 func (s *Server) boardTextCommand(ctx context.Context, sess *session, cmd string, sub int, params map[string]string) (queryReply, string) {
@@ -270,6 +367,84 @@ func (s *Server) boardTextCommand(ctx context.Context, sess *session, cmd string
 	}
 }
 
+func (s *Server) boardSMSCommand(ctx context.Context, sess *session, slot int, phone, body string, accept func(string) bool) string {
+	s.mu.Lock()
+	same := s.active == sess
+	s.mu.Unlock()
+	if !same {
+		return "device_connection_changed"
+	}
+	id := tid()
+	ch := make(chan queryReply, 2)
+	watch := make(chan protocol.Event, 8)
+	sess.mu.Lock()
+	sess.tid = id
+	sess.response = ch
+	sess.smsWatch = watch
+	sess.acceptSMSReport = true
+	sess.mu.Unlock()
+	defer func() {
+		sess.mu.Lock()
+		if sess.tid == id {
+			sess.tid = ""
+			sess.response = nil
+			sess.smsWatch = nil
+			sess.acceptSMSReport = false
+		}
+		sess.mu.Unlock()
+	}()
+	s.Logs.Record("voicemail_sms_command", diagnostics.Fields{Session: sess.diagnosticID, Transaction: diagnostics.Reference(id), Slot: slot, SubType: 16})
+	if err := s.write(sess, map[string]any{"cmd": "sendsms", "p1": strconv.Itoa(slot), "p2": phone, "p3": body, "tid": id}); err != nil {
+		return "device_write_failed"
+	}
+	ack := time.NewTimer(12 * time.Second)
+	defer ack.Stop()
+	acked := false
+	for !acked {
+		select {
+		case result := <-ch:
+			s.mu.Lock()
+			same = s.active == sess
+			s.mu.Unlock()
+			if !same {
+				return "device_connection_changed"
+			}
+			e := result.event
+			if e.Code != nil && *e.Code != 0 {
+				return "device_query_failed"
+			}
+			if e.Type == 402 || e.Type == 502 {
+				acked = true
+			}
+		case <-ack.C:
+			return "device_result_unknown"
+		case <-ctx.Done():
+			return "device_result_unknown"
+		}
+	}
+	wait := time.NewTimer(20 * time.Second)
+	defer wait.Stop()
+	for {
+		select {
+		case ev := <-watch:
+			if voicemailCommandSMS(ev) {
+				continue
+			}
+			compact := compactSMS(ev.Body)
+			if strings.Contains(compact, "密码不正确") || strings.Contains(compact, "格式错误") {
+				return "voicemail_sms_rejected"
+			}
+			if accept(ev.Body) {
+				return ""
+			}
+		case <-wait.C:
+			return "device_result_unknown"
+		case <-ctx.Done():
+			return "device_result_unknown"
+		}
+	}
+}
+
 func parseSlotModes(value string) (map[int]int, bool) {
 	parts := strings.Split(strings.TrimSpace(value), ";")
 	if len(parts) != 2 {
@@ -297,7 +472,7 @@ func parseSlotModes(value string) (map[int]int, bool) {
 		}
 		out[slot] = mode
 	}
-	if out[1] < 0 || out[2] < 0 || len(out) != 2 {
+	if len(out) != 2 {
 		return nil, false
 	}
 	return out, true
@@ -319,12 +494,12 @@ func parseAMRURL(value string) (string, bool) {
 }
 
 func sameVoicemailState(a, b voicemailBoardState) bool {
-	if a.AMRURL != b.AMRURL || len(a.Slots) != 2 || len(b.Slots) != 2 {
+	if a.AMRURL != b.AMRURL || a.Channel != b.Channel || len(a.Slots) != 2 || len(b.Slots) != 2 {
 		return false
 	}
 	for _, slot := range []int{1, 2} {
 		left, right := slotByNumber(a, slot), slotByNumber(b, slot)
-		if left.Slot != slot || right.Slot != slot || left.Mode != right.Mode || left.TTS != right.TTS {
+		if left.Slot != slot || right.Slot != slot || !sameOptionalInt(left.Mode, right.Mode) || !sameOptionalString(left.TTS, right.TTS) {
 			return false
 		}
 	}
@@ -338,4 +513,132 @@ func slotByNumber(state voicemailBoardState, slot int) voicemailSlotState {
 		}
 	}
 	return voicemailSlotState{}
+}
+
+func sameOptionalInt(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+func sameOptionalString(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+var boardPhone = regexp.MustCompile(`^\+?[0-9]{3,20}$`)
+
+func validBoardPassword(password string) bool {
+	if len(password) < 4 || len(password) > 20 {
+		return false
+	}
+	for _, r := range password {
+		if r <= 32 || r > 126 || strings.ContainsRune("#@&~", r) {
+			return false
+		}
+	}
+	return true
+}
+
+func voicemailSMSBody(slot int, password, kind string, mode int, tts string) (string, bool) {
+	if (slot != 1 && slot != 2) || !validBoardPassword(password) {
+		return "", false
+	}
+	switch kind {
+	case "mode":
+		if mode != 0 && mode != 2 {
+			return "", false
+		}
+		return "*#slot" + strconv.Itoa(slot) + "cim#" + password + "#" + strconv.Itoa(mode), true
+	case "tts":
+		if strings.ContainsAny(tts, "#@&~\x00\r\n") {
+			return "", false
+		}
+		return "*#slot" + strconv.Itoa(slot) + "tts#" + password + "#" + tts, true
+	default:
+		return "", false
+	}
+}
+
+func compactSMS(body string) string {
+	return strings.Map(func(r rune) rune {
+		if r == ' ' || r == '\n' || r == '\r' || r == '\t' {
+			return -1
+		}
+		return r
+	}, body)
+}
+
+func smsModeOK(body string, slot, mode int) bool {
+	text := compactSMS(body)
+	if !strings.Contains(text, "卡槽"+strconv.Itoa(slot)) || !strings.Contains(text, "设置为来电") {
+		return false
+	}
+	switch mode {
+	case 0:
+		return strings.Contains(text, "不接听")
+	case 2:
+		if strings.Contains(text, "不接听") {
+			return false
+		}
+		return strings.Contains(text, "接听并录音") || strings.Contains(text, "自动挂断") || strings.Contains(text, "自动接听")
+	default:
+		return false
+	}
+}
+
+func smsTTSOK(body string, slot int, clear bool) bool {
+	text := compactSMS(body)
+	if !strings.Contains(text, "卡槽"+strconv.Itoa(slot)+"的自动语音") {
+		return false
+	}
+	if clear {
+		return strings.Contains(text, "已经取消")
+	}
+	return strings.Contains(text, "已经设置完成")
+}
+
+func voicemailCommandSMS(e protocol.Event) bool {
+	for _, chunk := range smsChunks(e) {
+		folded := strings.ToLower(strings.TrimSpace(chunk))
+		for _, prefix := range []string{"*#slot1cim#", "*#slot2cim#", "*#slot1tts#", "*#slot2tts#", "*#slottts#", "*#slotts#", "*#slotcim#"} {
+			if strings.Contains(folded, prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func voicemailControlSMS(e protocol.Event) bool {
+	if voicemailCommandSMS(e) {
+		return true
+	}
+	text := compactSMS(e.Body)
+	if strings.Contains(text, "用户密码不正确") || strings.Contains(text, "指令格式错误") {
+		return true
+	}
+	if strings.Contains(text, "自动语音") && (strings.Contains(text, "已经设置完成") || strings.Contains(text, "已经取消")) {
+		return true
+	}
+	return strings.Contains(text, "设置为来电")
+}
+
+func smsChunks(e protocol.Event) []string {
+	chunks := []string{}
+	if e.Body != "" {
+		chunks = append(chunks, e.Body)
+	}
+	for _, part := range e.Fragments {
+		_, text, ok := strings.Cut(part, ",")
+		if ok {
+			chunks = append(chunks, text)
+		} else if part != "" {
+			chunks = append(chunks, part)
+		}
+	}
+	return chunks
 }

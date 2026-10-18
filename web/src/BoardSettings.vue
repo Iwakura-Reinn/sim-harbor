@@ -14,7 +14,14 @@ const seconds = ref(null),
   note = ref(''),
   consent = ref(false),
   voicemailConsent = ref(''),
+  smsPhone = ref(''),
+  smsPassword = ref(''),
   uncertain = ref(false)
+const smsReady = computed(
+  () =>
+    voicemail.value?.channel !== 'sms' ||
+    (smsPhone.value.trim() !== '' && smsPassword.value !== ''),
+)
 const showIdentity = ref(false),
   historyOpen = ref(false)
 const rawStatus = computed(() =>
@@ -36,6 +43,7 @@ async function query(action) {
     } else if (action === 'voicemail_query') {
       voicemail.value = r.voicemail
       voicemailConsent.value = ''
+      smsPassword.value = ''
       uncertain.value = false
     } else storage.value = r.storage
   } catch (e) {
@@ -50,9 +58,14 @@ async function applyVoicemail(intent) {
   error.value = ''
   note.value = ''
   try {
-    const r = await flow.applyVoicemail(intent, voicemail.value, true)
+    const sms =
+      voicemail.value?.channel === 'sms'
+        ? { phone: smsPhone.value.trim(), password: smsPassword.value }
+        : undefined
+    const r = await flow.applyVoicemail(intent, voicemail.value, true, sms)
     if (r) {
       voicemail.value = r.voicemail
+      smsPassword.value = ''
       note.value = r.unchanged
         ? '板子留言参数已与目标一致，未下发修改。'
         : intent === 'enable'
@@ -68,6 +81,8 @@ async function applyVoicemail(intent) {
   }
 }
 function slotLine(slot) {
+  if (slot.mode == null || typeof slot.tts !== 'string')
+    return `卡槽 ${slot.slot}：TCP 未返回来电方式和提示音`
   const names = { 0: '不接听', 1: '接听', 2: '接听并录音', 3: '挂断' }
   return `卡槽 ${slot.slot}：${names[slot.mode] || '待核对'} · 提示音 ${slot.tts ? '已设置' : '空'}`
 }
@@ -139,8 +154,8 @@ onUnmounted(() => flow.dispose())
       <h3>
         留言
         <InfoTip label="留言设置说明"
-          >只下发 slotcim、slottts
-          和录音上传地址。来电上报本身不会接听或开始录音。启用前先在系统配置打开留言并重启。恢复会把已配置卡槽改回不接听、清空提示音和上传地址。查询提示音不应清空已保存的文字；若读回变空，停止写入并按文档恢复。</InfoTip
+          >上传地址用 TCP askamrurl / setamrurl。来电方式和提示音先试
+          TCP；固件拒绝时，确认后才从该卡槽向它自己的号码发送短信指令。读取不会发短信。来电上报本身不会接听或开始录音。启用前先在系统配置打开留言并重启。恢复会把已配置卡槽改回不接听、清空提示音和上传地址。</InfoTip
         >
       </h3>
       <button type="button" :disabled="busy || !state?.online" @click="query('voicemail_query')">
@@ -149,9 +164,22 @@ onUnmounted(() => flow.dispose())
       <template v-if="voicemail">
         <p v-for="slot in voicemail.slots" :key="slot.slot">{{ slotLine(slot) }}</p>
         <p class="tiny muted">上传地址：{{ voicemail.amr_url || '空' }}</p>
-        <p class="tiny muted">
+        <p v-if="voicemail.channel === 'sms'" class="tiny muted">
+          固件拒绝了 TCP
+          来电方式和提示音。读取不会发短信。确认后从所选卡槽向下面的号码发送短信指令，可能产生短信费用。再次读取仍可能显示
+          TCP 未返回，以上一次确认结果为准。
+        </p>
+        <p v-else class="tiny muted">
           启用将按已生效的系统配置写入接听并录音、预设提示音和局域网上传地址。其他卡槽保持刚才读到的值。
         </p>
+        <template v-if="voicemail.channel === 'sms'">
+          <label
+            >接收指令的本机号码<input v-model="smsPhone" autocomplete="off" inputmode="tel"
+          /></label>
+          <label
+            >用户密码<input v-model="smsPassword" type="password" autocomplete="new-password"
+          /></label>
+        </template>
         <label class="consent"
           ><input
             v-model="voicemailConsent"
@@ -171,7 +199,7 @@ onUnmounted(() => flow.dispose())
         <button
           type="button"
           class="primary"
-          :disabled="busy || uncertain || !voicemailConsent || !state?.online"
+          :disabled="busy || uncertain || !voicemailConsent || !smsReady || !state?.online"
           @click="applyVoicemail(voicemailConsent)"
         >
           确认下发一次

@@ -16,6 +16,8 @@ var catalog = map[string]Definition{
 	"board_parameter_verified":        {"info", "query", "板子参数修改已读回确认"},
 	"voicemail_stored":                {"info", "call", "留言录音已保存"},
 	"voicemail_rejected":              {"warn", "call", "留言录音未接受"},
+	"voicemail_sms_channel":           {"info", "query", "来电方式和提示音的 TCP 命令被拒绝，确认后的写入改用短信指令"},
+	"voicemail_sms_command":           {"info", "query", "已提交一条留言短信指令；读取留言参数不会发送短信"},
 	"status_alert_observation_failed": {"warn", "notification", "持续异常观察暂时失败"},
 	"card_notifications_changed":      {"info", "notification", "卡通知开关已更新"},
 	"service_started":                 {"info", "service", "应用已启动"},
