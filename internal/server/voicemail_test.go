@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Battery233/sim-harbor/internal/config"
+	"github.com/Battery233/sim-harbor/internal/diagnostics"
 	"github.com/Battery233/sim-harbor/internal/protocol"
 )
 
@@ -28,7 +29,7 @@ func enableVoicemail(c *config.Config, token string, slots ...int) {
 	c.VoicemailAMRURL = voicemailURL(token)
 }
 
-func TestVoicemailEnabledCallSendsNoCommandsAndSkipsMissedBark(t *testing.T) {
+func TestVoicemailUnansweredCallSendsNoCommandsAndSkipsMissedBark(t *testing.T) {
 	payloads := make(chan map[string]any, 2)
 	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var p map[string]any
@@ -75,11 +76,77 @@ func TestVoicemailEnabledCallSendsNoCommandsAndSkipsMissedBark(t *testing.T) {
 	}
 	board.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 	if p, err := protocol.NewReader(board).Next(); err == nil {
-		t.Fatal("voicemail call sent a device command", len(p))
+		t.Fatal("unanswered voicemail call sent a device command", len(p))
 	}
 	if w := action(s, "/calls/1/answer", map[string]bool{"confirmed": true}); w.Code != 404 && w.Code != 405 {
 		t.Fatal("call control route", w.Code)
 	}
+}
+
+func TestVoicemailConnectedSendsTTSOnce(t *testing.T) {
+	s, l := fixture(t, 1, func(c *config.Config) { enableVoicemail(c, strings.Repeat("ab", 16), 2) })
+	board := connect(t, l)
+	send(t, board, s.codec(), map[string]any{"type": 998, "devId": "SIM-TEST"})
+	waitActive(t, s)
+	board.SetDeadline(time.Now().Add(20 * time.Second))
+	start := time.Now().Unix()
+	send(t, board, s.codec(), map[string]any{"devId": "SIM-TEST", "type": 601, "slot": 2, "phNum": "SYNTHETIC-CALLER", "telStartTs": start, "telConnectedTs": 0})
+	expectNoBoardCommand(t, board)
+	send(t, board, s.codec(), map[string]any{"type": 602, "slot": 2, "phNum": "SYNTHETIC-CALLER", "telStartTs": start, "telConnectedTs": 0})
+	expectNoBoardCommand(t, board)
+	connected := start + 3
+	send(t, board, s.codec(), map[string]any{"type": 602, "slot": 2, "phNum": "SYNTHETIC-CALLER", "telStartTs": start, "telConnectedTs": connected})
+	cmd := read(t, protocol.NewReader(board), s.codec())
+	assertGreeting(t, cmd, s.Config.VoicemailTTS)
+	send(t, board, s.codec(), map[string]any{"type": 402, "subType": 26, "code": 0, "tid": cmd["tid"]})
+	send(t, board, s.codec(), map[string]any{"type": 401, "subType": 26, "code": 0, "tid": cmd["tid"]})
+	waitVoicemailLog(t, s, "voicemail_greeting")
+	send(t, board, s.codec(), map[string]any{"type": 602, "slot": 2, "phNum": "SYNTHETIC-CALLER", "telStartTs": start, "telConnectedTs": connected})
+	expectNoBoardCommand(t, board)
+	send(t, board, s.codec(), map[string]any{"type": 602, "slot": 1, "phNum": "SYNTHETIC-CALLER", "telStartTs": start + 30, "telConnectedTs": start + 31})
+	expectNoBoardCommand(t, board)
+	send(t, board, s.codec(), map[string]any{"type": 602, "slot": 2, "phNum": "SYNTHETIC-CALLER", "telStartTs": start + 40, "telConnectedTs": start + 41})
+	cmd = read(t, protocol.NewReader(board), s.codec())
+	assertGreeting(t, cmd, s.Config.VoicemailTTS)
+	send(t, board, s.codec(), map[string]any{"type": 401, "subType": 26, "code": 200, "tid": cmd["tid"], "note": "No call in progress"})
+	waitVoicemailLog(t, s, "voicemail_greeting_failed")
+	expectNoBoardCommand(t, board)
+}
+
+func assertGreeting(t *testing.T, cmd map[string]any, text string) {
+	t.Helper()
+	if cmd["cmd"] != "telstarttts" || cmd["p1"] != float64(2) || cmd["p2"] != text || cmd["p3"] != float64(1) || cmd["p5"] != float64(0) || cmd["p4"] != nil {
+		t.Fatal("greeting command", cmd)
+	}
+	for _, name := range []string{"telanswer", "telstartrecord", "teldial", "telhangup"} {
+		if cmd["cmd"] == name {
+			t.Fatal(name)
+		}
+	}
+}
+
+func expectNoBoardCommand(t *testing.T, board net.Conn) {
+	t.Helper()
+	board.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+	if p, err := protocol.NewReader(board).Next(); err == nil {
+		t.Fatal("unexpected device command", len(p))
+	}
+	board.SetDeadline(time.Now().Add(20 * time.Second))
+}
+
+func waitVoicemailLog(t *testing.T, s *Server, code string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		rows, _ := s.Logs.Snapshot(diagnostics.Filter{}, 100)
+		for _, row := range rows {
+			if row.Code == code {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("missing diagnostic", code)
 }
 
 func TestVoicemailUploadStoresLinksAndBarksOnce(t *testing.T) {
@@ -281,23 +348,20 @@ func TestVoicemailSettingsConfirmAndBoardWhitelist(t *testing.T) {
 	if seen[0] != "askamrurl" || seen[1] != "slotcim" {
 		t.Fatal(seen)
 	}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 2; i++ {
 		cmd := read(t, reader, runtime.codec())
 		seen = append(seen, cmd["cmd"].(string))
+		if cmd["cmd"] == "slottts" || cmd["cmd"] == "sendsms" || cmd["cmd"] == "telstarttts" {
+			t.Fatal("enable wrote a greeting preset", cmd["cmd"])
+		}
 		if cmd["cmd"] == "setamrurl" && cmd["p1"] != runtime.Config.VoicemailAMRURL {
 			t.Fatal("upload url", cmd["p1"])
-		}
-		if cmd["cmd"] == "slottts" && (cmd["p1"] != "1" || cmd["p2"] != runtime.Config.VoicemailTTS) {
-			t.Fatal("tts write", cmd)
 		}
 		if cmd["cmd"] == "slotcim" && (cmd["p1"] != "1" || cmd["p2"] != "2") {
 			t.Fatal("mode write", cmd)
 		}
 		if cmd["cmd"] == "slotcim" && cmd["p1"] == "2" {
 			t.Fatal("untouched slot written")
-		}
-		if cmd["cmd"] == "sendsms" {
-			t.Fatal("tcp path sent sms")
 		}
 		replyBoard(t, board, runtime, cmd, "ok")
 	}
@@ -336,9 +400,6 @@ func enabledReply(cmd map[string]any, cfg config.Config) string {
 	case "slotcim":
 		return "2;0"
 	case "slottts":
-		if cmd["p1"] == "1" {
-			return cfg.VoicemailTTS
-		}
 		return ""
 	case "askamrurl":
 		return cfg.VoicemailAMRURL
@@ -426,24 +487,15 @@ func TestVoicemailSMSFallbackWhenSlotCommandsRejected(t *testing.T) {
 		t.Fatal("upload url", cmd)
 	}
 	replyBoard(t, board, runtime, cmd, runtime.Config.VoicemailAMRURL)
-	for _, want := range []string{
-		"*#slot2tts#" + password + "#" + runtime.Config.VoicemailTTS,
-		"*#slot2cim#" + password + "#2",
-	} {
-		cmd = read(t, reader, runtime.codec())
-		if cmd["cmd"] != "sendsms" || cmd["p1"] != "2" || cmd["p2"] != phone || cmd["p3"] != want {
-			t.Fatal("sms command", cmd)
-		}
-		if strings.Contains(cmd["p3"].(string), "slot1") || strings.Contains(cmd["cmd"].(string), "tel") {
-			t.Fatal(cmd)
-		}
-		replyBoard(t, board, runtime, cmd, "sent")
-		replyText := "设备(SYNTHETIC)卡槽2的自动语音，已经设置完成。"
-		if strings.Contains(want, "slot2cim") {
-			replyText = "设备(SYNTHETIC) 卡槽2 设置为来电 2声后自动挂断"
-		}
-		send(t, board, runtime.codec(), map[string]any{"type": 501, "slot": 2, "phNum": phone, "smsTs": time.Now().Unix(), "smsBd": replyText})
+	cmd = read(t, reader, runtime.codec())
+	if cmd["cmd"] != "sendsms" || cmd["p1"] != "2" || cmd["p2"] != phone || cmd["p3"] != "*#slot2cim#"+password+"#2" {
+		t.Fatal("sms command", cmd)
 	}
+	if strings.Contains(cmd["p3"].(string), "slottts") || strings.Contains(cmd["p3"].(string), "slot1") {
+		t.Fatal("enable sent a greeting sms", cmd["p3"])
+	}
+	replyBoard(t, board, runtime, cmd, "sent")
+	send(t, board, runtime.codec(), map[string]any{"type": 501, "slot": 2, "phNum": phone, "smsTs": time.Now().Unix(), "smsBd": "设备(SYNTHETIC) 卡槽2 设置为来电 2声后自动挂断"})
 	cmd = read(t, reader, runtime.codec())
 	if cmd["cmd"] != "askamrurl" {
 		t.Fatal("readback", cmd["cmd"])
@@ -453,8 +505,8 @@ func TestVoicemailSMSFallbackWhenSlotCommandsRejected(t *testing.T) {
 	if w.Code != 200 || !strings.Contains(w.Body.String(), `"verified":true`) || strings.Contains(w.Body.String(), password) || strings.Contains(w.Body.String(), phone) {
 		t.Fatal(w.Code, w.Body)
 	}
-	if !strings.Contains(w.Body.String(), `"mode":2`) || !strings.Contains(w.Body.String(), runtime.Config.VoicemailTTS) {
-		t.Fatal("readback omitted slot 2", w.Body)
+	if !strings.Contains(w.Body.String(), `"mode":2`) || strings.Contains(w.Body.String(), runtime.Config.VoicemailTTS) {
+		t.Fatal("enable stored the greeting on the board snapshot", w.Body)
 	}
 	var stored int
 	if err := runtime.Store.DB.QueryRow(`SELECT count(*) FROM messages WHERE instr(body, ?) > 0 OR instr(body, ?) > 0 OR instr(body, ?) > 0`, password, "已经设置完成", "自动挂断").Scan(&stored); err != nil || stored != 0 {
@@ -486,6 +538,140 @@ func TestVoicemailSMSReplyParsing(t *testing.T) {
 	plain := protocol.Event{Type: 501, Body: "合成短信"}
 	if !voicemailControlSMS(echo) || !voicemailControlSMS(reply) || voicemailControlSMS(plain) {
 		t.Fatal("control classification")
+	}
+}
+
+func TestVoicemailGreetingClaimRules(t *testing.T) {
+	s, _ := fixture(t, 1, func(c *config.Config) { enableVoicemail(c, strings.Repeat("ab", 16), 2) })
+	connected := protocol.Number(10)
+	zero := protocol.Number(0)
+	ev := protocol.Event{Type: 602, Slot: 2, TelStartTS: 1, TelConnectedTS: &connected}
+	if !s.claimVoicemailGreeting(ev) || s.claimVoicemailGreeting(ev) {
+		t.Fatal("same connected call claimed twice")
+	}
+	s.Config.VoicemailEnabled = false
+	ev.TelStartTS = 2
+	if s.claimVoicemailGreeting(ev) {
+		t.Fatal("disabled slot claimed a greeting")
+	}
+	s.Config.VoicemailEnabled = true
+	ev.TelConnectedTS = &zero
+	ev.TelStartTS = 3
+	if s.claimVoicemailGreeting(ev) {
+		t.Fatal("unconnected report claimed a greeting")
+	}
+	ev.Type = 601
+	ev.TelConnectedTS = &connected
+	ev.TelStartTS = 4
+	if s.claimVoicemailGreeting(ev) {
+		t.Fatal("ringing claimed a greeting")
+	}
+	ev.Type = 602
+	ev.Slot = 1
+	ev.TelStartTS = 5
+	if s.claimVoicemailGreeting(ev) {
+		t.Fatal("unselected slot claimed a greeting")
+	}
+	s.Config.VoicemailTTS = ""
+	ev.Slot = 2
+	ev.TelStartTS = 6
+	if s.claimVoicemailGreeting(ev) {
+		t.Fatal("empty greeting claimed")
+	}
+}
+
+func TestVoicemailEnableLeavesPresetAndRestoreClearsIt(t *testing.T) {
+	token := strings.Repeat("ef", 16)
+	runtime, listener := fixture(t, 1, func(c *config.Config) { enableVoicemail(c, token, 2) })
+	board := connect(t, listener)
+	send(t, board, runtime.codec(), map[string]any{"type": 998, "devId": "SIM-TEST"})
+	waitActive(t, runtime)
+	board.SetDeadline(time.Now().Add(20 * time.Second))
+	reader := protocol.NewReader(board)
+	done := make(chan *httptest.ResponseRecorder, 1)
+	current := map[string]any{"channel": "tcp", "amr_url": "", "slots": []map[string]any{{"slot": 1, "mode": 0, "tts": ""}, {"slot": 2, "mode": 0, "tts": "旧预设"}}}
+	go func() {
+		done <- action(runtime, "/board/parameters", map[string]any{"action": "voicemail_apply", "intent": "enable", "confirmed": true, "expected": current})
+	}()
+	answerPresetRead(t, board, runtime, reader, "", "0;0", "旧预设")
+	cmd := read(t, reader, runtime.codec())
+	if cmd["cmd"] != "setamrurl" || cmd["p1"] != runtime.Config.VoicemailAMRURL {
+		t.Fatal("upload url", cmd)
+	}
+	replyBoard(t, board, runtime, cmd, "ok")
+	cmd = read(t, reader, runtime.codec())
+	if cmd["cmd"] != "slotcim" || cmd["p1"] != "2" || cmd["p2"] != "2" {
+		t.Fatal("mode write", cmd)
+	}
+	replyBoard(t, board, runtime, cmd, "ok")
+	cmd = read(t, reader, runtime.codec())
+	if cmd["cmd"] != "askamrurl" {
+		t.Fatal("enable wrote a greeting preset", cmd)
+	}
+	replyBoard(t, board, runtime, cmd, runtime.Config.VoicemailAMRURL)
+	cmd = read(t, reader, runtime.codec())
+	if cmd["cmd"] != "slotcim" {
+		t.Fatal("readback", cmd)
+	}
+	replyBoard(t, board, runtime, cmd, "0;2")
+	answerSlotTTS(t, board, runtime, reader, "", "旧预设")
+	w := <-done
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"verified":true`) || !strings.Contains(w.Body.String(), "旧预设") {
+		t.Fatal(w.Code, w.Body)
+	}
+
+	enabled := map[string]any{"channel": "tcp", "amr_url": runtime.Config.VoicemailAMRURL, "slots": []map[string]any{{"slot": 1, "mode": 0, "tts": ""}, {"slot": 2, "mode": 2, "tts": "旧预设"}}}
+	go func() {
+		done <- action(runtime, "/board/parameters", map[string]any{"action": "voicemail_apply", "intent": "restore", "confirmed": true, "expected": enabled})
+	}()
+	answerPresetRead(t, board, runtime, reader, runtime.Config.VoicemailAMRURL, "0;2", "旧预设")
+	cmd = read(t, reader, runtime.codec())
+	if cmd["cmd"] != "slotcim" || cmd["p1"] != "2" || cmd["p2"] != "0" {
+		t.Fatal("restore mode", cmd)
+	}
+	replyBoard(t, board, runtime, cmd, "ok")
+	cmd = read(t, reader, runtime.codec())
+	if cmd["cmd"] != "slottts" || cmd["p1"] != "2" || cmd["p2"] != "" {
+		t.Fatal("restore did not clear the preset", cmd)
+	}
+	replyBoard(t, board, runtime, cmd, "ok")
+	cmd = read(t, reader, runtime.codec())
+	if cmd["cmd"] != "setamrurl" || cmd["p1"] != "clear" {
+		t.Fatal("restore url", cmd)
+	}
+	replyBoard(t, board, runtime, cmd, "")
+	answerPresetRead(t, board, runtime, reader, "", "0;0", "")
+	w = <-done
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"verified":true`) || strings.Contains(w.Body.String(), "旧预设") {
+		t.Fatal(w.Code, w.Body)
+	}
+}
+
+func answerPresetRead(t *testing.T, board net.Conn, s *Server, reader *protocol.Reader, url, modes, slot2 string) {
+	t.Helper()
+	cmd := read(t, reader, s.codec())
+	if cmd["cmd"] != "askamrurl" {
+		t.Fatal("url read", cmd)
+	}
+	replyBoard(t, board, s, cmd, url)
+	cmd = read(t, reader, s.codec())
+	if cmd["cmd"] != "slotcim" {
+		t.Fatal("mode read", cmd)
+	}
+	replyBoard(t, board, s, cmd, modes)
+	answerSlotTTS(t, board, s, reader, "", slot2)
+}
+
+func answerSlotTTS(t *testing.T, board net.Conn, s *Server, reader *protocol.Reader, slot1, slot2 string) {
+	t.Helper()
+	for _, item := range []struct {
+		slot, text string
+	}{{"1", slot1}, {"2", slot2}} {
+		cmd := read(t, reader, s.codec())
+		if cmd["cmd"] != "slottts" || cmd["p1"] != item.slot || cmd["p2"] != nil {
+			t.Fatal("tts read", cmd)
+		}
+		replyBoard(t, board, s, cmd, item.text)
 	}
 }
 

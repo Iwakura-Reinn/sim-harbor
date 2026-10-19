@@ -81,10 +81,17 @@ async function applyVoicemail(intent) {
   }
 }
 function slotLine(slot) {
-  if (slot.mode == null || typeof slot.tts !== 'string')
-    return `卡槽 ${slot.slot}：TCP 未返回来电方式和提示音`
   const names = { 0: '不接听', 1: '接听', 2: '接听并录音', 3: '挂断' }
-  return `卡槽 ${slot.slot}：${names[slot.mode] || '待核对'} · 提示音 ${slot.tts ? '已设置' : '空'}`
+  if (slot.mode == null && typeof slot.tts !== 'string')
+    return `卡槽 ${slot.slot}：TCP 未返回来电方式`
+  const mode = slot.mode == null ? '来电方式未返回' : names[slot.mode] || '待核对'
+  const preset =
+    typeof slot.tts !== 'string'
+      ? '提示音预设未读取'
+      : slot.tts
+        ? '板子上仍有提示音预设'
+        : '提示音预设为空'
+  return `卡槽 ${slot.slot}：${mode} · ${preset}`
 }
 async function save() {
   busy.value = true
@@ -154,8 +161,10 @@ onUnmounted(() => flow.dispose())
       <h3>
         留言
         <InfoTip label="留言设置说明"
-          >上传地址用 TCP askamrurl / setamrurl。来电方式和提示音先试
-          TCP；固件拒绝时，确认后才从该卡槽向它自己的号码发送短信指令。读取不会发短信。来电上报本身不会接听或开始录音。启用前先在系统配置打开留言并重启。恢复会把已配置卡槽改回不接听、清空提示音和上传地址。</InfoTip
+          >上传地址用 TCP askamrurl / setamrurl。来电方式先试
+          TCP；固件拒绝时，确认后才从该卡槽向它自己的号码发送模式短信。启用不再下发提示音预设，接通后由
+          Harbor
+          发送一次。读取不会发短信。启用前先在系统配置打开留言并重启。恢复会把已配置卡槽改回不接听，并清空仍留在板子上的提示音预设和上传地址。</InfoTip
         >
       </h3>
       <button type="button" :disabled="busy || !state?.online" @click="query('voicemail_query')">
@@ -166,11 +175,12 @@ onUnmounted(() => flow.dispose())
         <p class="tiny muted">上传地址：{{ voicemail.amr_url || '空' }}</p>
         <p v-if="voicemail.channel === 'sms'" class="tiny muted">
           固件拒绝了 TCP
-          来电方式和提示音。读取不会发短信。确认后从所选卡槽向下面的号码发送短信指令，可能产生短信费用。再次读取仍可能显示
-          TCP 未返回，以上一次确认结果为准。
+          来电方式。读取不会发短信。确认启用后从所选卡槽向下面的号码发送模式短信，可能产生短信费用；这次不发送提示音短信。再次读取仍可能显示
+          TCP 未返回，以上一次确认结果为准。若板子上仍有旧的提示音预设，恢复会再发一条清空短信。
         </p>
         <p v-else class="tiny muted">
-          启用将按已生效的系统配置写入接听并录音、预设提示音和局域网上传地址。其他卡槽保持刚才读到的值。
+          启用将按已生效的系统配置写入接听并录音和局域网上传地址，不改已有提示音预设。其他卡槽保持刚才读到的值。接通后的提示音由
+          Harbor 发送一次。
         </p>
         <template v-if="voicemail.channel === 'sms'">
           <label

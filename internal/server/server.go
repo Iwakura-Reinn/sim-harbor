@@ -36,6 +36,7 @@ type session struct {
 	response        chan queryReply
 	smsWatch        chan protocol.Event
 	acceptSMSReport bool
+	acceptTTSAck    bool
 	hasStatus       bool // Protected by Server.mu; cached status must belong to this connection.
 	statusAt        time.Time
 	lastSeen        time.Time
@@ -64,6 +65,8 @@ type Server struct {
 	notificationGate sync.Mutex
 	exportGate       sync.Mutex
 	query            sync.Mutex
+	greetingMu       sync.Mutex
+	greetingSent     map[string]time.Time
 	wg               sync.WaitGroup
 	client           *http.Client
 }
@@ -262,13 +265,25 @@ func (s *Server) handle(ctx context.Context, c net.Conn) {
 			default:
 			}
 		}
-		if e.TID != "" && e.TID == sess.tid && sess.response != nil && (e.Type == 402 || (e.Type == 401 && e.Code != nil && *e.Code != 0) || (sess.acceptSMSReport && e.Type == 502)) {
+		// telstarttts is accepted on 401/subType 26, including code 0. A later 402 is not required and must not occupy this waiter.
+		ttsAck := sess.acceptTTSAck && e.Type == 401 && int(e.SubType) == 26 && e.Code != nil
+		regularAck := !sess.acceptTTSAck && (e.Type == 402 || (e.Type == 401 && e.Code != nil && *e.Code != 0) || (sess.acceptSMSReport && e.Type == 502))
+		if e.TID != "" && e.TID == sess.tid && sess.response != nil && (ttsAck || regularAck) {
 			select {
 			case sess.response <- queryReply{e, receivedAt}:
 			default:
 			}
 		}
 		sess.mu.Unlock()
+		if s.claimVoicemailGreeting(e) {
+			text := s.Config.VoicemailTTS
+			slot := int(e.Slot)
+			s.wg.Add(1)
+			go func() {
+				defer s.wg.Done()
+				s.playVoicemailGreeting(sess, slot, text)
+			}()
+		}
 	}
 }
 func tid() string {

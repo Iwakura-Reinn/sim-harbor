@@ -22,7 +22,9 @@
 
 来电开始、结束、接通和冲突信息分别处理，结束信息待定时以明确标注的提醒帮助核对。板子本地历史独立查询，应用长期历史通过业务库与一致备份管理。
 
-留言使用板子原生命令预先配置，不在来电上报后编排录音。录音地址使用厂家 TCP `setamrurl` / `askamrurl`（子类型 55 / 56）。来电方式 `slotcim` 和提示音 `slottts` 在厂家目录里是短信指令；TCP 查询若回 401，读取仍保留 `askamrurl` 的结果，确认后的写入改为 `sendsms` 投递 `*#slotNcim#` / `*#slotNtts#`。应用不在提示音之后发送 `telstartrecord`，也不在来电事件上发送 `telanswer`。提示音与录音的逐通 TCP 编排仍是后续工作，当前版本不提供该路径。
+留言的自动接听、录音和上传地址仍预先配置。录音地址使用厂家 TCP `setamrurl` / `askamrurl`（子类型 55 / 56）。来电方式 `slotcim` 在厂家目录里是短信指令；TCP 查询若回 401，读取仍保留 `askamrurl` 的结果，确认启用后的模式写入改为 `sendsms` 投递 `*#slotNcim#`。启用不再下发 `slottts` 预设。
+
+提示音由 Harbor 在接通后参与一次：已启用卡槽出现 type 602 且 `telConnectedTs` 大于 0 时，发送一条 TCP `telstarttts`。`p1` 是卡槽数字，`p2` 是配置中的提示音，`p3` 为 1，`p5` 为 0。同一通电话只发一次。成功接受看 type 401、subType 26、code 0，不要求 type 402。应用不发送 `telanswer`、`telstartrecord`、`teldial` 或 `telhangup`，也不用 `p5=1` 结束留言。模式 2 从接听起录音，提示音下行可能和留言在同一段 AMR 中。以前留下的 `slottts` 预设要靠恢复清空，否则会与这一次播放叠在一起。
 
 ## 命令与结果
 

@@ -83,15 +83,9 @@ func (s *Server) handleVoicemailBoard(w http.ResponseWriter, r *http.Request, ac
 		return
 	}
 	if !sameVoicemailState(current, target) {
-		if current.Channel == "sms" {
-			if !boardPhone.MatchString(strings.TrimSpace(smsPhone)) || !validBoardPassword(smsPassword) {
-				reply(w, 409, map[string]string{"error": "voicemail_sms_required"})
-				return
-			}
-			if intent == "enable" && strings.ContainsAny(s.Config.VoicemailTTS, "#@&~") {
-				reply(w, 400, map[string]string{"error": "voicemail_tts_rejected"})
-				return
-			}
+		if needsVoicemailSMS(current, target) && (!boardPhone.MatchString(strings.TrimSpace(smsPhone)) || !validBoardPassword(smsPassword)) {
+			reply(w, 409, map[string]string{"error": "voicemail_sms_required"})
+			return
 		}
 		if problem = s.writeVoicemailBoard(r.Context(), sess, intent, strings.TrimSpace(smsPhone), smsPassword, current, target); problem != "" {
 			if problem == "voicemail_sms_rejected" {
@@ -136,9 +130,8 @@ func (s *Server) voicemailTarget(intent string, current voicemailBoardState) (vo
 		target.AMRURL = s.Config.VoicemailAMRURL
 		for i, slot := range target.Slots {
 			if touch[slot.Slot] {
-				mode, text := 2, s.Config.VoicemailTTS
+				mode := 2
 				target.Slots[i].Mode = &mode
-				target.Slots[i].TTS = &text
 			}
 		}
 	case "restore":
@@ -491,6 +484,19 @@ func parseAMRURL(value string) (string, bool) {
 		return "", false
 	}
 	return value, true
+}
+
+func needsVoicemailSMS(current, target voicemailBoardState) bool {
+	if current.Channel != "sms" {
+		return false
+	}
+	for _, slot := range []int{1, 2} {
+		left, right := slotByNumber(current, slot), slotByNumber(target, slot)
+		if !sameOptionalInt(left.Mode, right.Mode) || !sameOptionalString(left.TTS, right.TTS) {
+			return true
+		}
+	}
+	return false
 }
 
 func sameVoicemailState(a, b voicemailBoardState) bool {

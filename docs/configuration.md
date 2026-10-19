@@ -50,7 +50,7 @@
 | `status_alerts_enabled` | 持续异常与恢复提醒，需 Bark 可用 |
 | `voicemail_enabled` | 留言开关，默认关闭。开启需网页二次确认并重启；板子参数另在“板子设置”下发。见[留言](voicemail.md) |
 | `voicemail_slots` | 允许自动接听并录音的卡槽，取 1 和/或 2 |
-| `voicemail_tts` | 接听后播放的提示音，最长 274 个字符 |
+| `voicemail_tts` | 接通后由 Harbor 用 TCP `telstarttts` 播放一次的提示音，最长 274 个字符。启用确认不把这段文字写成板子预设 |
 | `voicemail_amr_url` | 板子可访问的局域网 HTTP 上传地址，须带端口和路径令牌 |
 | `outbound_enabled` | 短信外发开关，默认关闭；恢复保护优先 |
 | `send_interval_seconds` | 每卡发送间隔，默认 60 秒，可配置 10～86400 秒 |
