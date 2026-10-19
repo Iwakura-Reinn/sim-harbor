@@ -68,9 +68,11 @@ async function applyVoicemail(intent) {
       smsPassword.value = ''
       note.value = r.unchanged
         ? '板子留言参数已与目标一致，未下发修改。'
-        : intent === 'enable'
-          ? '留言参数已下发并读回。'
-          : '已恢复为不接听，并读回确认。'
+        : r.sms_submitted
+          ? '短信已提交。这块固件经常没有控制短信回报，因此不把它当成失败。上传地址已用 TCP 读回；来电方式请打电话核对。'
+          : intent === 'enable'
+            ? '留言参数已下发并读回。'
+            : '已恢复为不接听，并读回确认。'
     }
   } catch (e) {
     error.value = e.message + ' 请先重新查询，不要重复提交。'
@@ -175,8 +177,8 @@ onUnmounted(() => flow.dispose())
         <p class="tiny muted">上传地址：{{ voicemail.amr_url || '空' }}</p>
         <p v-if="voicemail.channel === 'sms'" class="tiny muted">
           固件拒绝了 TCP
-          来电方式。读取不会发短信。确认启用后从所选卡槽向下面的号码发送模式短信，可能产生短信费用；这次不发送提示音短信。再次读取仍可能显示
-          TCP 未返回，以上一次确认结果为准。若板子上仍有旧的提示音预设，恢复会再发一条清空短信。
+          来电方式。读取不会发短信。确认启用后从所选卡槽向下面的号码发送模式短信，可能产生短信费用；这次不发送提示音短信。没有控制短信回报也不会失败。再次读取仍可能显示
+          TCP 未返回。若板子上仍有旧的提示音预设，恢复会再发一条清空短信。
         </p>
         <p v-else class="tiny muted">
           启用将按已生效的系统配置写入接听并录音和局域网上传地址，不改已有提示音预设。其他卡槽保持刚才读到的值。接通后的提示音由

@@ -267,7 +267,9 @@ func (s *Server) handle(ctx context.Context, c net.Conn) {
 		}
 		// telstarttts is accepted on 401/subType 26, including code 0. A later 402 is not required and must not occupy this waiter.
 		ttsAck := sess.acceptTTSAck && e.Type == 401 && int(e.SubType) == 26 && e.Code != nil
-		regularAck := !sess.acceptTTSAck && (e.Type == 402 || (e.Type == 401 && e.Code != nil && *e.Code != 0) || (sess.acceptSMSReport && e.Type == 502))
+		// Control SMS may be accepted with 401 code 0 ("sending") plus 502/503. Those must reach the waiter; 401 code 0 stays ignored for every other command.
+		smsReport := sess.acceptSMSReport && (e.Type == 502 || e.Type == 503 || (e.Type == 401 && e.Code != nil))
+		regularAck := !sess.acceptTTSAck && (e.Type == 402 || (e.Type == 401 && e.Code != nil && *e.Code != 0) || smsReport)
 		if e.TID != "" && e.TID == sess.tid && sess.response != nil && (ttsAck || regularAck) {
 			select {
 			case sess.response <- queryReply{e, receivedAt}:

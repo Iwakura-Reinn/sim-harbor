@@ -18,6 +18,7 @@ var catalog = map[string]Definition{
 	"voicemail_rejected":              {"warn", "call", "留言录音未接受"},
 	"voicemail_sms_channel":           {"info", "query", "TCP 来电方式被拒绝，确认后的模式写入改用短信；启用不再下发提示音预设"},
 	"voicemail_sms_command":           {"info", "query", "已提交一条留言短信指令；读取留言参数不会发送短信"},
+	"voicemail_sms_submitted":         {"info", "query", "留言短信已交给板子；没有控制短信回报也不判定失败"},
 	"voicemail_greeting":              {"info", "call", "接通后已下发一次 telstarttts；播放一轮且不挂断"},
 	"voicemail_greeting_failed":       {"warn", "call", "接通后的 telstarttts 未被板子接受；不会自动重发"},
 	"status_alert_observation_failed": {"warn", "notification", "持续异常观察暂时失败"},

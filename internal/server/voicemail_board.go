@@ -82,12 +82,14 @@ func (s *Server) handleVoicemailBoard(w http.ResponseWriter, r *http.Request, ac
 		reply(w, 400, map[string]string{"error": "invalid_board_action"})
 		return
 	}
+	smsSubmitted := false
 	if !sameVoicemailState(current, target) {
 		if needsVoicemailSMS(current, target) && (!boardPhone.MatchString(strings.TrimSpace(smsPhone)) || !validBoardPassword(smsPassword)) {
 			reply(w, 409, map[string]string{"error": "voicemail_sms_required"})
 			return
 		}
-		if problem = s.writeVoicemailBoard(r.Context(), sess, intent, strings.TrimSpace(smsPhone), smsPassword, current, target); problem != "" {
+		smsSubmitted, problem = s.writeVoicemailBoard(r.Context(), sess, intent, strings.TrimSpace(smsPhone), smsPassword, current, target)
+		if problem != "" {
 			if problem == "voicemail_sms_rejected" {
 				reply(w, 502, map[string]string{"error": problem})
 				return
@@ -102,7 +104,7 @@ func (s *Server) handleVoicemailBoard(w http.ResponseWriter, r *http.Request, ac
 		return
 	}
 	s.Logs.Record("board_parameter_verified", diagnostics.Fields{Session: sess.diagnosticID})
-	reply(w, 200, map[string]any{"voicemail": verified, "verified": true, "unchanged": sameVoicemailState(current, target)})
+	reply(w, 200, map[string]any{"voicemail": verified, "verified": true, "unchanged": sameVoicemailState(current, target), "sms_submitted": smsSubmitted})
 }
 
 func (s *Server) voicemailTarget(intent string, current voicemailBoardState) (voicemailBoardState, bool) {
@@ -149,7 +151,7 @@ func (s *Server) voicemailTarget(intent string, current voicemailBoardState) (vo
 	return target, true
 }
 
-func (s *Server) writeVoicemailBoard(ctx context.Context, sess *session, intent, phone, password string, current, target voicemailBoardState) string {
+func (s *Server) writeVoicemailBoard(ctx context.Context, sess *session, intent, phone, password string, current, target voicemailBoardState) (bool, string) {
 	type tcpStep struct {
 		cmd    string
 		sub    int
@@ -162,6 +164,7 @@ func (s *Server) writeVoicemailBoard(ctx context.Context, sess *session, intent,
 	}
 	var tcp []tcpStep
 	var messages []smsStep
+	unconfirmed := false
 	modeWrites := func() {
 		for _, slot := range target.Slots {
 			cur := slotByNumber(current, slot.Slot)
@@ -224,7 +227,7 @@ func (s *Server) writeVoicemailBoard(ctx context.Context, sess *session, intent,
 	}
 	for _, item := range messages {
 		if item.body == "" || item.ok == nil {
-			return "board_setting_unknown"
+			return false, "board_setting_unknown"
 		}
 	}
 	runTCP := func(items []tcpStep) string {
@@ -237,22 +240,29 @@ func (s *Server) writeVoicemailBoard(ctx context.Context, sess *session, intent,
 	}
 	runSMS := func() string {
 		for _, item := range messages {
-			if problem := s.boardSMSCommand(ctx, sess, item.slot, phone, item.body, item.ok); problem != "" {
+			confirmed, problem := s.boardSMSCommand(ctx, sess, item.slot, phone, item.body, item.ok)
+			if problem != "" {
 				return problem
+			}
+			if !confirmed {
+				unconfirmed = true
 			}
 		}
 		return ""
 	}
 	if intent == "restore" {
 		if problem := runSMS(); problem != "" {
-			return problem
+			return false, problem
 		}
-		return runTCP(tcp)
+		return unconfirmed, runTCP(tcp)
 	}
 	if problem := runTCP(tcp); problem != "" {
-		return problem
+		return false, problem
 	}
-	return runSMS()
+	if problem := runSMS(); problem != "" {
+		return false, problem
+	}
+	return unconfirmed, ""
 }
 
 func (s *Server) readVoicemailBoard(ctx context.Context, sess *session) (voicemailBoardState, string) {
@@ -360,15 +370,15 @@ func (s *Server) boardTextCommand(ctx context.Context, sess *session, cmd string
 	}
 }
 
-func (s *Server) boardSMSCommand(ctx context.Context, sess *session, slot int, phone, body string, accept func(string) bool) string {
+func (s *Server) boardSMSCommand(ctx context.Context, sess *session, slot int, phone, body string, accept func(string) bool) (bool, string) {
 	s.mu.Lock()
 	same := s.active == sess
 	s.mu.Unlock()
 	if !same {
-		return "device_connection_changed"
+		return false, "device_connection_changed"
 	}
 	id := tid()
-	ch := make(chan queryReply, 2)
+	ch := make(chan queryReply, 4)
 	watch := make(chan protocol.Event, 8)
 	sess.mu.Lock()
 	sess.tid = id
@@ -388,52 +398,63 @@ func (s *Server) boardSMSCommand(ctx context.Context, sess *session, slot int, p
 	}()
 	s.Logs.Record("voicemail_sms_command", diagnostics.Fields{Session: sess.diagnosticID, Transaction: diagnostics.Reference(id), Slot: slot, SubType: 16})
 	if err := s.write(sess, map[string]any{"cmd": "sendsms", "p1": strconv.Itoa(slot), "p2": phone, "p3": body, "tid": id}); err != nil {
-		return "device_write_failed"
+		return false, "device_write_failed"
 	}
-	ack := time.NewTimer(12 * time.Second)
-	defer ack.Stop()
-	acked := false
-	for !acked {
+	// X32v158 often never sends the type 501 control text. A sendsms accept
+	// (401/402/502/503) or this short wait is enough; a 501 is optional evidence.
+	timer := time.NewTimer(4 * time.Second)
+	defer timer.Stop()
+	sawAccept := false
+	submitted := false
+	for {
 		select {
 		case result := <-ch:
 			s.mu.Lock()
 			same = s.active == sess
 			s.mu.Unlock()
 			if !same {
-				return "device_connection_changed"
+				return false, "device_connection_changed"
 			}
 			e := result.event
 			if e.Code != nil && *e.Code != 0 {
-				return "device_query_failed"
+				return false, "device_query_failed"
 			}
-			if e.Type == 402 || e.Type == 502 {
-				acked = true
+			switch e.Type {
+			case 401:
+				sawAccept = true
+			case 402, 502, 503:
+				sawAccept = true
+				if !submitted {
+					submitted = true
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+					timer.Reset(time.Second)
+				}
 			}
-		case <-ack.C:
-			return "device_result_unknown"
-		case <-ctx.Done():
-			return "device_result_unknown"
-		}
-	}
-	wait := time.NewTimer(20 * time.Second)
-	defer wait.Stop()
-	for {
-		select {
 		case ev := <-watch:
 			if voicemailCommandSMS(ev) {
 				continue
 			}
 			compact := compactSMS(ev.Body)
 			if strings.Contains(compact, "密码不正确") || strings.Contains(compact, "格式错误") {
-				return "voicemail_sms_rejected"
+				return false, "voicemail_sms_rejected"
 			}
 			if accept(ev.Body) {
-				return ""
+				return true, ""
 			}
-		case <-wait.C:
-			return "device_result_unknown"
+		case <-timer.C:
+			outcome := "device_result_unknown"
+			if sawAccept {
+				outcome = "accepted"
+			}
+			s.Logs.Record("voicemail_sms_submitted", diagnostics.Fields{Session: sess.diagnosticID, Transaction: diagnostics.Reference(id), Slot: slot, Outcome: outcome})
+			return false, ""
 		case <-ctx.Done():
-			return "device_result_unknown"
+			return false, "device_result_unknown"
 		}
 	}
 }

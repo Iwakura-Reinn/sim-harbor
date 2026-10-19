@@ -502,7 +502,7 @@ func TestVoicemailSMSFallbackWhenSlotCommandsRejected(t *testing.T) {
 	}
 	replyBoard(t, board, runtime, cmd, runtime.Config.VoicemailAMRURL)
 	w = <-done
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `"verified":true`) || strings.Contains(w.Body.String(), password) || strings.Contains(w.Body.String(), phone) {
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"verified":true`) || !strings.Contains(w.Body.String(), `"sms_submitted":false`) || strings.Contains(w.Body.String(), password) || strings.Contains(w.Body.String(), phone) {
 		t.Fatal(w.Code, w.Body)
 	}
 	if !strings.Contains(w.Body.String(), `"mode":2`) || strings.Contains(w.Body.String(), runtime.Config.VoicemailTTS) {
@@ -512,6 +512,153 @@ func TestVoicemailSMSFallbackWhenSlotCommandsRejected(t *testing.T) {
 	if err := runtime.Store.DB.QueryRow(`SELECT count(*) FROM messages WHERE instr(body, ?) > 0 OR instr(body, ?) > 0 OR instr(body, ?) > 0`, password, "已经设置完成", "自动挂断").Scan(&stored); err != nil || stored != 0 {
 		t.Fatal("control sms stored", stored, err)
 	}
+}
+
+func TestVoicemailSMSSucceedsWithoutControlReceipt(t *testing.T) {
+	const phone, password = "+8613800138000", "000000"
+	token := strings.Repeat("ab", 16)
+	runtime, listener := fixture(t, 1, func(c *config.Config) { enableVoicemail(c, token, 2) })
+	board := connect(t, listener)
+	send(t, board, runtime.codec(), map[string]any{"type": 998, "devId": "SIM-TEST"})
+	waitActive(t, runtime)
+	board.SetDeadline(time.Now().Add(20 * time.Second))
+	reader := protocol.NewReader(board)
+	done := make(chan *httptest.ResponseRecorder, 1)
+	unknown := map[string]any{"channel": "sms", "amr_url": "", "slots": []map[string]any{{"slot": 1, "mode": nil, "tts": nil}, {"slot": 2, "mode": nil, "tts": nil}}}
+	go func() {
+		done <- action(runtime, "/board/parameters", map[string]any{"action": "voicemail_apply", "intent": "enable", "confirmed": true, "expected": unknown, "sms_phone": phone, "sms_password": password})
+	}()
+	answerVoicemailRead(t, board, runtime, reader, "")
+	cmd := read(t, reader, runtime.codec())
+	if cmd["cmd"] != "setamrurl" {
+		t.Fatal(cmd)
+	}
+	replyBoard(t, board, runtime, cmd, runtime.Config.VoicemailAMRURL)
+	cmd = read(t, reader, runtime.codec())
+	if cmd["cmd"] != "sendsms" || cmd["p2"] != phone || cmd["p3"] != "*#slot2cim#"+password+"#2" {
+		t.Fatal(cmd)
+	}
+	send(t, board, runtime.codec(), map[string]any{"type": 401, "subType": 16, "code": 0, "tid": cmd["tid"]})
+	send(t, board, runtime.codec(), map[string]any{"type": 502, "code": 0, "tid": cmd["tid"], "slot": 2, "phNum": phone})
+	cmd = read(t, reader, runtime.codec())
+	if cmd["cmd"] != "askamrurl" {
+		t.Fatal("missing 501 blocked enable", cmd)
+	}
+	replyBoard(t, board, runtime, cmd, runtime.Config.VoicemailAMRURL)
+	w := <-done
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"sms_submitted":true`) || !strings.Contains(w.Body.String(), `"mode":2`) || strings.Contains(w.Body.String(), phone) || strings.Contains(w.Body.String(), password) {
+		t.Fatal(w.Code, w.Body)
+	}
+	rows, _ := runtime.Logs.Snapshot(diagnostics.Filter{}, 100)
+	found := false
+	for _, row := range rows {
+		if row.Code == "voicemail_sms_submitted" && row.Outcome == "accepted" && row.Slot == 2 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("missing submit diagnostic")
+	}
+
+	queried := map[string]any{"channel": "sms", "amr_url": runtime.Config.VoicemailAMRURL, "slots": []map[string]any{{"slot": 1, "mode": nil, "tts": nil}, {"slot": 2, "mode": nil, "tts": nil}}}
+	go func() {
+		done <- action(runtime, "/board/parameters", map[string]any{"action": "voicemail_apply", "intent": "restore", "confirmed": true, "expected": queried, "sms_phone": phone, "sms_password": password})
+	}()
+	answerVoicemailRead(t, board, runtime, reader, runtime.Config.VoicemailAMRURL)
+	cmd = read(t, reader, runtime.codec())
+	if cmd["cmd"] != "sendsms" || cmd["p3"] != "*#slot2cim#"+password+"#0" {
+		t.Fatal("restore mode", cmd)
+	}
+	send(t, board, runtime.codec(), map[string]any{"type": 401, "subType": 16, "code": 0, "tid": cmd["tid"]})
+	send(t, board, runtime.codec(), map[string]any{"type": 502, "code": 0, "tid": cmd["tid"], "slot": 2, "phNum": phone})
+	cmd = read(t, reader, runtime.codec())
+	if cmd["cmd"] != "sendsms" || cmd["p3"] != "*#slot2tts#"+password+"#" {
+		t.Fatal("restore clear", cmd)
+	}
+	send(t, board, runtime.codec(), map[string]any{"type": 503, "tid": cmd["tid"], "slot": 2, "phNum": phone, "smsSt": 0, "smsScts": 1700000000, "smsDt": 1700000001})
+	cmd = read(t, reader, runtime.codec())
+	if cmd["cmd"] != "setamrurl" || cmd["p1"] != "clear" {
+		t.Fatal("restore url", cmd)
+	}
+	replyBoard(t, board, runtime, cmd, "")
+	cmd = read(t, reader, runtime.codec())
+	if cmd["cmd"] != "askamrurl" {
+		t.Fatal("missing 501 blocked restore", cmd)
+	}
+	replyBoard(t, board, runtime, cmd, "")
+	w = <-done
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"sms_submitted":true`) || !strings.Contains(w.Body.String(), `"mode":0`) || strings.Contains(w.Body.String(), "请在提示音后留言") {
+		t.Fatal(w.Code, w.Body)
+	}
+}
+
+func TestVoicemailSMSTimeoutStillSubmits(t *testing.T) {
+	const phone, password = "13800138000", "000000"
+	token := strings.Repeat("cd", 16)
+	runtime, listener := fixture(t, 1, func(c *config.Config) { enableVoicemail(c, token, 2) })
+	board := connect(t, listener)
+	send(t, board, runtime.codec(), map[string]any{"type": 998, "devId": "SIM-TEST"})
+	waitActive(t, runtime)
+	board.SetDeadline(time.Now().Add(20 * time.Second))
+	reader := protocol.NewReader(board)
+	done := make(chan *httptest.ResponseRecorder, 1)
+	unknown := map[string]any{"channel": "sms", "amr_url": "", "slots": []map[string]any{{"slot": 1, "mode": nil, "tts": nil}, {"slot": 2, "mode": nil, "tts": nil}}}
+	go func() {
+		done <- action(runtime, "/board/parameters", map[string]any{"action": "voicemail_apply", "intent": "enable", "confirmed": true, "expected": unknown, "sms_phone": phone, "sms_password": password})
+	}()
+	answerVoicemailRead(t, board, runtime, reader, "")
+	cmd := read(t, reader, runtime.codec())
+	replyBoard(t, board, runtime, cmd, runtime.Config.VoicemailAMRURL)
+	cmd = read(t, reader, runtime.codec())
+	if cmd["cmd"] != "sendsms" {
+		t.Fatal(cmd)
+	}
+	cmd = read(t, reader, runtime.codec())
+	if cmd["cmd"] != "askamrurl" {
+		t.Fatal("silent sendsms failed the apply", cmd)
+	}
+	replyBoard(t, board, runtime, cmd, runtime.Config.VoicemailAMRURL)
+	w := <-done
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"sms_submitted":true`) {
+		t.Fatal(w.Code, w.Body)
+	}
+	rows, _ := runtime.Logs.Snapshot(diagnostics.Filter{}, 100)
+	found := false
+	for _, row := range rows {
+		if row.Code == "voicemail_sms_submitted" && row.Outcome == "device_result_unknown" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("missing optimistic diagnostic")
+	}
+}
+
+func TestVoicemailSMSRejectionStillFails(t *testing.T) {
+	const phone, password = "13800138000", "000000"
+	token := strings.Repeat("ef", 16)
+	runtime, listener := fixture(t, 1, func(c *config.Config) { enableVoicemail(c, token, 2) })
+	board := connect(t, listener)
+	send(t, board, runtime.codec(), map[string]any{"type": 998, "devId": "SIM-TEST"})
+	waitActive(t, runtime)
+	board.SetDeadline(time.Now().Add(20 * time.Second))
+	reader := protocol.NewReader(board)
+	done := make(chan *httptest.ResponseRecorder, 1)
+	unknown := map[string]any{"channel": "sms", "amr_url": "", "slots": []map[string]any{{"slot": 1, "mode": nil, "tts": nil}, {"slot": 2, "mode": nil, "tts": nil}}}
+	go func() {
+		done <- action(runtime, "/board/parameters", map[string]any{"action": "voicemail_apply", "intent": "enable", "confirmed": true, "expected": unknown, "sms_phone": phone, "sms_password": password})
+	}()
+	answerVoicemailRead(t, board, runtime, reader, "")
+	cmd := read(t, reader, runtime.codec())
+	replyBoard(t, board, runtime, cmd, runtime.Config.VoicemailAMRURL)
+	cmd = read(t, reader, runtime.codec())
+	replyBoard(t, board, runtime, cmd, "sent")
+	send(t, board, runtime.codec(), map[string]any{"type": 501, "slot": 2, "phNum": phone, "smsTs": time.Now().Unix(), "smsBd": "用户密码不正确"})
+	w := <-done
+	if w.Code != 502 || !strings.Contains(w.Body.String(), "voicemail_sms_rejected") || strings.Contains(w.Body.String(), password) {
+		t.Fatal(w.Code, w.Body)
+	}
+	expectNoBoardCommand(t, board)
 }
 
 func TestVoicemailSMSReplyParsing(t *testing.T) {
