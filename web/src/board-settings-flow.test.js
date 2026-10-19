@@ -74,10 +74,24 @@ test('固件拒绝 TCP 时，确认请求才携带短信号码和密码', async 
   await flow.query('voicemail_query')
   assert.equal(calls[0].body.sms_phone, undefined)
   assert.equal(calls[0].body.sms_password, undefined)
-  await flow.applyVoicemail('enable', smsState, true, { phone: '13800138000', password: '000000' })
-  assert.equal(calls[1].body.sms_phone, '13800138000')
-  assert.equal(calls[1].body.sms_password, '000000')
-  assert.equal(calls[1].options.timeout, 90000)
+  const restored = {
+    channel: 'sms',
+    amr_url: '',
+    slots: [
+      { slot: 1, mode: 0, tts: '' },
+      { slot: 2, mode: 0, tts: '' },
+    ],
+  }
+  await flow.applyVoicemail('enable', restored, true, { phone: '13800138000', password: '000000' })
+  assert.equal(calls[1].body.action, 'voicemail_query')
+  assert.equal(calls[1].body.sms_phone, undefined)
+  assert.equal(calls[2].body.action, 'voicemail_apply')
+  assert.equal(calls[2].body.intent, 'enable')
+  assert.equal(calls[2].body.expected.slots[1].mode, null)
+  assert.equal(calls[2].body.expected.slots[1].tts, null)
+  assert.equal(calls[2].body.sms_phone, '13800138000')
+  assert.equal(calls[2].body.sms_password, '000000')
+  assert.equal(calls[2].options.timeout, 90000)
 })
 test('板子设置结果不完整不声称成功，不支持任意命令', async () => {
   const flow = createBoardSettingsFlow({ request: async () => ({ seconds: 120 }) })

@@ -73,7 +73,8 @@ func (s *Server) handleVoicemailBoard(w http.ResponseWriter, r *http.Request, ac
 		return
 	}
 	var expected voicemailBoardState
-	if json.Unmarshal(expectedRaw, &expected) != nil || !sameVoicemailState(current, expected) {
+	// SMS reads leave mode and TTS nil. That means TCP did not return them, not that a restore snapshot of 0 and "" has drifted.
+	if json.Unmarshal(expectedRaw, &expected) != nil || !voicemailObservationAgrees(current, expected) {
 		reply(w, 409, map[string]string{"error": "board_parameter_changed"})
 		return
 	}
@@ -518,6 +519,33 @@ func needsVoicemailSMS(current, target voicemailBoardState) bool {
 		}
 	}
 	return false
+}
+
+func voicemailObservationAgrees(current, expected voicemailBoardState) bool {
+	if current.AMRURL != expected.AMRURL || current.Channel != expected.Channel || len(current.Slots) != 2 || len(expected.Slots) != 2 {
+		return false
+	}
+	for _, slot := range []int{1, 2} {
+		left, right := slotByNumber(current, slot), slotByNumber(expected, slot)
+		if left.Slot != slot || right.Slot != slot || !unknownIntAgrees(left.Mode, right.Mode) || !unknownStringAgrees(left.TTS, right.TTS) {
+			return false
+		}
+	}
+	return true
+}
+
+func unknownIntAgrees(a, b *int) bool {
+	if a == nil || b == nil {
+		return true
+	}
+	return *a == *b
+}
+
+func unknownStringAgrees(a, b *string) bool {
+	if a == nil || b == nil {
+		return true
+	}
+	return *a == *b
 }
 
 func sameVoicemailState(a, b voicemailBoardState) bool {

@@ -61,12 +61,28 @@ export function createBoardSettingsFlow({ request }) {
       if (!confirmed || !['enable', 'restore'].includes(intent))
         throw Error('请先查询并核对要修改的参数。')
       checkedVoicemail(expected)
+      let snapshot = expected
+      if (intent === 'enable') {
+        busy = true
+        try {
+          const fresh = await request('/board/parameters', 'POST', { action: 'voicemail_query' })
+          if (disposed) return null
+          checkedVoicemail(fresh.voicemail)
+          snapshot = fresh.voicemail
+        } catch (e) {
+          if (!disposed) uncertain = true
+          throw e
+        } finally {
+          busy = false
+        }
+        if (uncertain || disposed) return null
+      }
       busy = true
       try {
         const body = {
           action: 'voicemail_apply',
           intent,
-          expected,
+          expected: snapshot,
           confirmed: true,
         }
         if (sms?.phone) body.sms_phone = sms.phone

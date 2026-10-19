@@ -661,6 +661,82 @@ func TestVoicemailSMSRejectionStillFails(t *testing.T) {
 	expectNoBoardCommand(t, board)
 }
 
+func TestVoicemailUnreadSnapshotAgrees(t *testing.T) {
+	mode := func(n int) *int { return &n }
+	text := func(s string) *string { return &s }
+	sms := func(url string, left, right voicemailSlotState) voicemailBoardState {
+		return voicemailBoardState{Channel: "sms", AMRURL: url, Slots: []voicemailSlotState{left, right}}
+	}
+	unread := sms("", voicemailSlotState{Slot: 1}, voicemailSlotState{Slot: 2})
+	restored := sms("", voicemailSlotState{Slot: 1, Mode: mode(0), TTS: text("")}, voicemailSlotState{Slot: 2, Mode: mode(0), TTS: text("")})
+	enabled := sms("http://192.168.31.10:18880/api/voicemail/amr/"+strings.Repeat("ab", 16), voicemailSlotState{Slot: 1}, voicemailSlotState{Slot: 2, Mode: mode(2)})
+	if !voicemailObservationAgrees(unread, restored) || !voicemailObservationAgrees(restored, unread) {
+		t.Fatal("restore 0/empty drifted from unread null")
+	}
+	queried := unread
+	queried.AMRURL = enabled.AMRURL
+	if !voicemailObservationAgrees(queried, enabled) {
+		t.Fatal("unread mode drifted from an enable snapshot")
+	}
+	concrete := sms("", voicemailSlotState{Slot: 1, Mode: mode(0), TTS: text("")}, voicemailSlotState{Slot: 2, Mode: mode(2), TTS: text("旧预设")})
+	cleared := restored
+	if voicemailObservationAgrees(concrete, cleared) || voicemailObservationAgrees(sms("http://192.0.2.1:9/api/voicemail/amr/aa", voicemailSlotState{Slot: 1}, voicemailSlotState{Slot: 2}), unread) {
+		t.Fatal("concrete mode or url drift was ignored")
+	}
+	if sameVoicemailState(unread, restored) {
+		t.Fatal("unread null became identical to 0 for a write decision")
+	}
+}
+
+func TestVoicemailEnableAcceptsRestoreBodyOnSMS(t *testing.T) {
+	const phone, password = "13800138000", "000000"
+	token := strings.Repeat("ab", 16)
+	runtime, listener := fixture(t, 1, func(c *config.Config) { enableVoicemail(c, token, 2) })
+	board := connect(t, listener)
+	send(t, board, runtime.codec(), map[string]any{"type": 998, "devId": "SIM-TEST"})
+	waitActive(t, runtime)
+	board.SetDeadline(time.Now().Add(20 * time.Second))
+	reader := protocol.NewReader(board)
+	done := make(chan *httptest.ResponseRecorder, 1)
+	restored := map[string]any{"channel": "sms", "amr_url": "", "slots": []map[string]any{{"slot": 1, "mode": 0, "tts": ""}, {"slot": 2, "mode": 0, "tts": ""}}}
+	go func() {
+		done <- action(runtime, "/board/parameters", map[string]any{"action": "voicemail_apply", "intent": "enable", "confirmed": true, "expected": restored, "sms_phone": phone, "sms_password": password})
+	}()
+	answerVoicemailRead(t, board, runtime, reader, "")
+	cmd := read(t, reader, runtime.codec())
+	if cmd["cmd"] != "setamrurl" {
+		t.Fatal("restore snapshot was treated as drift", cmd)
+	}
+	replyBoard(t, board, runtime, cmd, runtime.Config.VoicemailAMRURL)
+	cmd = read(t, reader, runtime.codec())
+	if cmd["cmd"] != "sendsms" || cmd["p3"] != "*#slot2cim#"+password+"#2" {
+		t.Fatal(cmd)
+	}
+	send(t, board, runtime.codec(), map[string]any{"type": 401, "subType": 16, "code": 0, "tid": cmd["tid"]})
+	send(t, board, runtime.codec(), map[string]any{"type": 502, "code": 0, "tid": cmd["tid"], "slot": 2, "phNum": phone})
+	cmd = read(t, reader, runtime.codec())
+	if cmd["cmd"] != "askamrurl" {
+		t.Fatal(cmd)
+	}
+	replyBoard(t, board, runtime, cmd, runtime.Config.VoicemailAMRURL)
+	if w := <-done; w.Code != 200 || strings.Contains(w.Body.String(), "board_parameter_changed") {
+		t.Fatal(w.Code, w.Body)
+	}
+
+	stale := map[string]any{"channel": "sms", "amr_url": "http://192.0.2.1:9/api/voicemail/amr/" + token, "slots": []map[string]any{{"slot": 1, "mode": 0, "tts": ""}, {"slot": 2, "mode": 2, "tts": "旧预设"}}}
+	go func() {
+		done <- action(runtime, "/board/parameters", map[string]any{"action": "voicemail_apply", "intent": "enable", "confirmed": true, "expected": stale, "sms_phone": phone, "sms_password": password})
+	}()
+	answerVoicemailRead(t, board, runtime, reader, runtime.Config.VoicemailAMRURL)
+	if w := <-done; w.Code != 409 || !strings.Contains(w.Body.String(), "board_parameter_changed") {
+		t.Fatal(w.Code, w.Body)
+	}
+	board.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	if _, err := reader.Next(); err == nil {
+		t.Fatal("url drift continued into a write")
+	}
+}
+
 func TestVoicemailSMSReplyParsing(t *testing.T) {
 	if body, ok := voicemailSMSBody(2, "000000", "mode", 2, ""); !ok || body != "*#slot2cim#000000#2" {
 		t.Fatal(body, ok)
