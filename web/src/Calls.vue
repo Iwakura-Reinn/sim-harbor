@@ -12,6 +12,8 @@ import {
 } from './call-history.js'
 import CallEntry from './CallEntry.vue'
 import { saveFile } from './download.js'
+import { createVoicemailPlayer } from './voicemail-player.js'
+import { createVoicemailContext, decodeVoicemail } from './voicemail-audio.js'
 const props = defineProps({
   request: Function,
   fileRequest: Function,
@@ -28,7 +30,8 @@ const rows = ref([]),
   error = ref(''),
   linked = ref(null),
   linkedGroup = ref(null),
-  expanded = ref({})
+  expanded = ref({}),
+  playback = ref({ id: 0, phase: 'idle' })
 const options = computed(() => cardFilterOptions(props.state, props.now))
 const visible = computed(() =>
   linkedGroup.value && !rows.value.some((g) => g.id === linkedGroup.value.id)
@@ -41,6 +44,17 @@ let stopped = false,
   linkRevision = 0
 const details = new Map()
 const request = (...args) => props.request(...args)
+const player = createVoicemailPlayer({
+  request: (path, method, body, options) => {
+    if (!props.fileRequest) throw new Error('无法读取留言。')
+    return props.fileRequest(path, method, body, options)
+  },
+  decode: decodeVoicemail,
+  createContext: createVoicemailContext(),
+  onChange(state) {
+    playback.value = state
+  },
+})
 const history = createCallGroups({
   request,
   changed: (data) => {
@@ -122,6 +136,14 @@ function clearDetails() {
   details.clear()
   expanded.value = {}
 }
+async function playVoicemail(call) {
+  error.value = ''
+  try {
+    await player.toggle(call)
+  } catch (e) {
+    if (!stopped) error.value = e.message
+  }
+}
 async function downloadVoicemail(call) {
   if (!props.fileRequest || !call?.voicemail_id) return
   error.value = ''
@@ -176,6 +198,7 @@ onUnmounted(() => {
   stopped = true
   linkRevision++
   clearInterval(timer)
+  player.dispose()
   history.dispose()
   clearDetails()
 })
@@ -189,7 +212,7 @@ onUnmounted(() => {
         <h2>
           来电记录
           <InfoTip label="来电记录说明"
-            >同一卡、同一号码合并展示，展开查看每次来电。默认只记录，不会接听、拒接或拨号；完整未接结束后提醒一次；只有开始时，5分钟后兜底提醒。留言需在系统配置单独开启，录音可下载为
+            >同一卡、同一号码合并展示，展开查看每次来电。默认只记录，不会接听、拒接或拨号；完整未接结束后提醒一次；只有开始时，5分钟后兜底提醒。留言需在系统配置单独开启，录音可在网页内播放，也可下载为
             AMR。<br />次数包含这张卡的全部已保存来电，逐次记录保留当时卡名和卡槽。匿名或身份未确认的来电单独展示。时长以板子上报为准；Bark
             已接受不等于 iPhone 已读。</InfoTip
           >
@@ -265,6 +288,8 @@ onUnmounted(() => {
             :cards="state?.cards"
             :highlighted="linked?.id === call.id"
             :on-download="downloadVoicemail"
+            :on-play="playVoicemail"
+            :playback="playback"
           />
           <div v-if="expanded[group.id].next" class="load-more">
             <button :disabled="expanded[group.id].loading" @click="loadDetails(group, true)">
