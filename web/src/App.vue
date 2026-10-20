@@ -18,6 +18,7 @@ import DataTools from './DataTools.vue'
 import { createFileRequest } from './download.js'
 import { createRequest } from './request.js'
 import { createAccessSession } from './access-session.js'
+import { createAuthHeaders } from './auth-config.js'
 const tab = ref('inbox')
 const linkedCall = ref(0)
 const callsCardFilter = ref('')
@@ -35,6 +36,7 @@ const loading = ref(false),
 const unlocking = ref(false)
 const showRaw = ref(false)
 const access = createAccessSession()
+const authHeaders = createAuthHeaders()
 const locked = ref(false),
   token = ref(''),
   now = ref(Date.now() / 1000),
@@ -51,6 +53,18 @@ let credential = access.read(),
 const errors = {
   ...settingsErrors,
   invalid_board_action: '不支持此操作，或心跳值超过安全范围；请先核对参数。',
+  voicemail_disabled: '留言尚未在当前运行配置中启用。请先保存并重启应用。',
+  voicemail_sms_required:
+    '这块固件不接受 TCP 来电方式。请按卡槽填写本机号码和用户密码后再确认。两张卡要分别填写。',
+  sms_cost_required: '请确认这条控制短信会占用该卡短信并可能产生费用。',
+  stop_auto_answer_required:
+    '停止自动接听需要单独确认。这不是普通外发，也不会在未确认时绕过外发限制。',
+  control_already_dispatched: '这条控制短信可能已经发出。结果未知时不会自动重发。',
+  card_number_mismatch: '填写的号码和这块卡当前的本机号码不一致，已阻止发送。',
+  voicemail_sms_rejected:
+    '板子没有接受短信指令。请核对用户密码；密码错误时 30 分钟内可能不再回复。上传地址可能已经写入，请重新读取后再确认。',
+  voicemail_source_rejected: '留言上传来源不在设备允许范围内。',
+  voicemail_upload_rejected: '留言上传未通过校验。',
   board_parameter_changed: '板子的当前值已变化，请重新查询后再确认。',
   board_reply_invalid: '板子返回的参数无法识别，保留当前设置。',
   board_setting_unknown: '板子修改结果未确认，可能已经生效。',
@@ -95,6 +109,7 @@ const errors = {
 }
 const api = createRequest({
   getCredential: () => credential,
+  getAuthHeaders: (value) => authHeaders.get(value),
   onUnauthorized: lockAccess,
   errors,
 })
@@ -124,6 +139,7 @@ function escapeDetail() {
 }
 const fileRequest = createFileRequest({
   getCredential: () => credential,
+  getAuthHeaders: (value) => authHeaders.get(value),
   onUnauthorized: lockAccess,
 })
 const online = computed(
@@ -282,6 +298,7 @@ async function copy() {
 }
 async function unlock() {
   if (unlocking.value || stopped) return
+  authHeaders.reset()
   const version = ++generation
   unlocking.value = true
   credential = token.value.trim()
@@ -315,6 +332,7 @@ async function openLinked() {
     }
 }
 function forget() {
+  authHeaders.reset()
   deletion.reset()
   generation++
   queryRevision++
@@ -550,6 +568,7 @@ onUnmounted(() => {
           v-if="tab === 'calls' && state"
           :key="callsCardFilter"
           :request="api"
+          :file-request="fileRequest"
           :state="state"
           :now="now"
           :linked-id="linkedCall"
@@ -558,7 +577,7 @@ onUnmounted(() => {
         />
         <Notifications v-if="tab === 'notifications'" :request="api" />
         <Diagnostics v-if="tab === 'diagnostics'" :request="api" />
-        <SystemSettings v-if="tab === 'settings'" :request="api" />
+        <SystemSettings v-if="tab === 'settings'" :request="api" :state="state" />
         <BoardSettings v-if="tab === 'board-settings'" :request="api" :state="state" />
         <section v-show="tab === 'inbox'" class="inbox panel">
           <div class="inbox-heading">

@@ -21,6 +21,9 @@ func TestCardNameBackupRestoreAndLegacyMigration(t *testing.T) {
 			if err := s.Ingest(ctx, e, raw, true); err != nil {
 				t.Fatal(err)
 			}
+			if _, err := s.DB.Exec(`DROP TABLE IF EXISTS voicemail_controls; DROP TABLE IF EXISTS voicemails`); err != nil {
+				t.Fatal(err)
+			}
 			if version < 14 {
 				if _, err := s.DB.Exec(`DROP TABLE status_alert_jobs;DROP TABLE status_alert_monitors`); err != nil {
 					t.Fatal(err)
@@ -71,7 +74,7 @@ func TestCardNameBackupRestoreAndLegacyMigration(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if _, err := s.DB.Exec(`DELETE FROM schema_version; INSERT INTO schema_version VALUES(?)`, version); err != nil {
+			if _, err := s.DB.Exec(`DROP TABLE sms_receipts; DELETE FROM schema_version; INSERT INTO schema_version VALUES(?)`, version); err != nil {
 				t.Fatal(err)
 			}
 			a, err := Create(ctx, s, t.TempDir())

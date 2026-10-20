@@ -3,22 +3,32 @@
 export function createRequest({
   getCredential,
   onUnauthorized,
+  getAuthHeaders,
   errors = {},
   fetcher = fetch,
   timeout = 15000,
 }) {
-  return async (path, method = 'GET', body) => {
+  return async (path, method = 'GET', body, options = {}) => {
     const credential = getCredential()
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), timeout)
+    const limit =
+      Number.isFinite(options.timeout) && options.timeout > 0 ? options.timeout : timeout
+    const timer = setTimeout(() => controller.abort(), limit)
     try {
       let response, data
       try {
+        const authHeaders = getAuthHeaders
+          ? await getAuthHeaders(credential)
+          : credential
+            ? { Authorization: 'Bearer ' + credential }
+            : {}
+        if (credential !== getCredential()) throw new Error('identity changed')
         response = await fetcher('/api' + path, {
           method,
           signal: controller.signal,
+          redirect: 'error',
           headers: {
-            ...(credential ? { Authorization: 'Bearer ' + credential } : {}),
+            ...authHeaders,
             ...(body ? { 'Content-Type': 'application/json' } : {}),
           },
           body: body ? JSON.stringify(body) : undefined,
